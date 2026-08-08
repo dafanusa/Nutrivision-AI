@@ -1,0 +1,5 @@
+age_group,age_min_month,age_max_month,energy_kcal,protein_g,iron_mg,calcium_mg,vitamin_a_mcg,vitamin_c_mg
+0-5 bulan,0,5,550,9,0.3,200,375,40
+6-11 bulan,6,11,800,15,11.0,270,400,50
+1-3 tahun,12,47,1350,20,7.0,650,400,40
+4-6 tahun,48,83,1400,25,10.0,1000,450,45
