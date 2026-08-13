@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import html
-
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -20,8 +18,13 @@ def age_text(months: int) -> str:
 def confidence_label(predictions):
     if not predictions:
         return "Tidak tersedia"
-    top1 = predictions[0]["confidence"]
-    top2 = predictions[1]["confidence"] if len(predictions) > 1 else 0
+
+    top1 = float(predictions[0].get("confidence", 0))
+    top2 = (
+        float(predictions[1].get("confidence", 0))
+        if len(predictions) > 1
+        else 0.0
+    )
     margin = top1 - top2
 
     if top1 >= 0.85 and margin >= 0.20:
@@ -31,24 +34,147 @@ def confidence_label(predictions):
     return "Perlu konfirmasi"
 
 
-def contribution_dataframe(adequacy: dict) -> pd.DataFrame:
+def _empty_figure(
+    message: str,
+    *,
+    height: int = 390,
+) -> go.Figure:
+    """
+    Figure aman untuk kondisi ketika profil nutrisi belum tersedia.
+    Mencegah KeyError saat DataFrame kosong.
+    """
+    fig = go.Figure()
+
+    fig.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(
+            size=13,
+            color="#8792A6",
+        ),
+        align="center",
+    )
+
+    fig.update_layout(
+        height=height,
+        margin=dict(
+            l=20,
+            r=20,
+            t=30,
+            b=30,
+        ),
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+
+    return fig
+
+
+def contribution_dataframe(
+    adequacy: dict,
+) -> pd.DataFrame:
+    """
+    Bentuk tabel kontribusi dengan skema kolom yang stabil,
+    bahkan jika adequacy kosong.
+    """
+    columns = [
+        "key",
+        "Nutrisi",
+        "Kontribusi",
+        "Gap",
+        "Status",
+    ]
+
     rows = []
+
+    if not adequacy:
+        return pd.DataFrame(
+            columns=columns
+        )
+
     for key, value in adequacy.items():
-        pct = float(value["contribution_percent"])
+        if not isinstance(value, dict):
+            continue
+
+        try:
+            pct = float(
+                value.get(
+                    "contribution_percent",
+                    0,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            gap = float(
+                value.get(
+                    "gap_percent",
+                    max(
+                        100
+                        - min(
+                            max(pct, 0),
+                            100,
+                        ),
+                        0,
+                    ),
+                )
+            )
+        except (TypeError, ValueError):
+            gap = max(
+                100
+                - min(
+                    max(pct, 0),
+                    100,
+                ),
+                0,
+            )
+
         rows.append(
             {
                 "key": key,
-                "Nutrisi": DISPLAY_NAMES.get(key, key),
+                "Nutrisi": DISPLAY_NAMES.get(
+                    key,
+                    key,
+                ),
                 "Kontribusi": pct,
-                "Gap": max(100 - min(max(pct, 0), 100), 0),
-                "Status": value.get("status", ""),
+                "Gap": gap,
+                "Status": value.get(
+                    "status",
+                    "",
+                ),
             }
         )
-    return pd.DataFrame(rows)
+
+    return pd.DataFrame(
+        rows,
+        columns=columns,
+    )
 
 
-def contribution_chart(adequacy: dict):
-    df = contribution_dataframe(adequacy).sort_values("Kontribusi")
+def contribution_chart(
+    adequacy: dict,
+):
+    df = contribution_dataframe(
+        adequacy
+    )
+
+    if df.empty:
+        return _empty_figure(
+            "Kontribusi nutrisi belum tersedia.<br>"
+            "Profil nutrisi makanan belum berhasil dipetakan."
+        )
+
+    df = df.sort_values(
+        "Kontribusi"
+    )
+
     fig = go.Figure()
 
     fig.add_trace(
@@ -56,137 +182,321 @@ def contribution_chart(adequacy: dict):
             x=df["Kontribusi"],
             y=df["Nutrisi"],
             orientation="h",
-            text=[f"{v:.1f}%" for v in df["Kontribusi"]],
+            text=[
+                f"{v:.1f}%"
+                for v
+                in df["Kontribusi"]
+            ],
             textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Kontribusi: %{x:.1f}%<extra></extra>",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Kontribusi: %{x:.1f}%"
+                "<extra></extra>"
+            ),
         )
     )
 
-    for x, label in [(25, "25%"), (50, "50%"), (100, "100% AKG")]:
-        fig.add_vline(x=x, line_dash="dash", opacity=0.45)
-        fig.add_annotation(
-            x=x, y=1.06, xref="x", yref="paper",
-            text=label, showarrow=False, font=dict(size=11)
+    for x, label in [
+        (25, "25%"),
+        (50, "50%"),
+        (100, "100% AKG"),
+    ]:
+        fig.add_vline(
+            x=x,
+            line_dash="dash",
+            opacity=0.45,
         )
+        fig.add_annotation(
+            x=x,
+            y=1.06,
+            xref="x",
+            yref="paper",
+            text=label,
+            showarrow=False,
+            font=dict(size=11),
+        )
+
+    max_value = float(
+        df["Kontribusi"].max()
+    )
 
     fig.update_layout(
         height=390,
-        margin=dict(l=10, r=35, t=45, b=25),
-        xaxis_title="Kontribusi terhadap acuan (%)",
+        margin=dict(
+            l=10,
+            r=35,
+            t=45,
+            b=25,
+        ),
+        xaxis_title=(
+            "Kontribusi terhadap acuan AKG (%)"
+        ),
         yaxis_title="",
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(range=[0, max(110, float(df["Kontribusi"].max()) + 15)]),
+        xaxis=dict(
+            range=[
+                0,
+                max(
+                    110,
+                    max_value + 15,
+                ),
+            ]
+        ),
     )
+
     return fig
 
 
-def gap_chart(adequacy: dict):
-    df = contribution_dataframe(adequacy).sort_values("Gap")
+def gap_chart(
+    adequacy: dict,
+):
+    df = contribution_dataframe(
+        adequacy
+    )
+
+    if df.empty:
+        return _empty_figure(
+            "Gap nutrisi belum tersedia.<br>"
+            "Profil nutrisi makanan belum berhasil dipetakan."
+        )
+
+    df = df.sort_values(
+        "Gap"
+    )
 
     fig = go.Figure(
         go.Bar(
             x=df["Gap"],
             y=df["Nutrisi"],
             orientation="h",
-            text=[f"{v:.1f}%" for v in df["Gap"]],
+            text=[
+                f"{v:.1f}%"
+                for v
+                in df["Gap"]
+            ],
             textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Gap makanan: %{x:.1f}%<extra></extra>",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Gap makanan: %{x:.1f}%"
+                "<extra></extra>"
+            ),
         )
     )
 
     fig.update_layout(
         height=390,
-        margin=dict(l=10, r=35, t=30, b=25),
-        xaxis_title="Gap dari makanan yang dianalisis (%)",
+        margin=dict(
+            l=10,
+            r=35,
+            t=30,
+            b=25,
+        ),
+        xaxis_title=(
+            "Gap dari makanan yang dianalisis (%)"
+        ),
         yaxis_title="",
-        xaxis=dict(range=[0, 105]),
+        xaxis=dict(
+            range=[0, 105]
+        ),
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
+
     return fig
 
 
-def recommendation_chart(recommendations):
-    df = pd.DataFrame(recommendations).sort_values("score")
+def recommendation_chart(
+    recommendations,
+):
+    if not recommendations:
+        return _empty_figure(
+            "Rekomendasi belum tersedia.",
+            height=330,
+        )
+
+    df = pd.DataFrame(
+        recommendations
+    )
+
+    required = {
+        "score",
+        "food",
+    }
+
+    if (
+        df.empty
+        or not required.issubset(
+            df.columns
+        )
+    ):
+        return _empty_figure(
+            "Rekomendasi belum tersedia.",
+            height=330,
+        )
+
+    df = df.sort_values(
+        "score"
+    )
+
     fig = go.Figure(
         go.Bar(
             x=df["score"],
             y=df["food"],
             orientation="h",
-            text=[f"{v:.0f}" for v in df["score"]],
+            text=[
+                f"{v:.0f}"
+                for v
+                in df["score"]
+            ],
             textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Skor kecocokan: %{x:.1f}/100<extra></extra>",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Skor kecocokan: %{x:.1f}/100"
+                "<extra></extra>"
+            ),
         )
     )
 
     fig.update_layout(
         height=330,
-        margin=dict(l=10, r=35, t=25, b=25),
-        xaxis_title="Skor kecocokan internal",
+        margin=dict(
+            l=10,
+            r=35,
+            t=25,
+            b=25,
+        ),
+        xaxis_title=(
+            "Skor kecocokan internal"
+        ),
         yaxis_title="",
-        xaxis=dict(range=[0, 105]),
+        xaxis=dict(
+            range=[0, 105]
+        ),
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
+
     return fig
 
 
 def build_narrative(result):
-    p = result["child_profile"]
-    status = result["nutrition_status"]
-    preds = result["food_prediction"]
-    adequacy = result.get("nutrient_contribution", {})
-    recs = result.get("recommendations", [])
+    """
+    Dipertahankan untuk kompatibilitas dengan app lama.
+    App terbaru menggunakan build_narrative_id().
+    """
+    profile = result.get(
+        "child_profile",
+        {},
+    )
+    status = result.get(
+        "nutrition_status",
+        {},
+    )
+    preds = result.get(
+        "food_prediction",
+        [],
+    )
+    adequacy = result.get(
+        "nutrient_contribution",
+        {},
+    )
+    recs = result.get(
+        "recommendations",
+        [],
+    )
 
     parts = [
-        f"Untuk anak usia {age_text(p['age_months'])} dengan berat {p['weight_kg']:g} kg, "
-        f"tinggi {p['height_cm']:g} cm, dan MUAC/LILA {p['muac_cm']:g} cm, "
-        f"model antropometri memberikan hasil screening **{str(status['prediction']).title()}**"
-        + (
-            f" dengan confidence {status['confidence']*100:.1f}%."
-            if status.get("confidence") is not None
-            else "."
+        (
+            f"Untuk anak usia "
+            f"{age_text(profile.get('age_months', 0))} "
+            f"dengan berat {profile.get('weight_kg', 0):g} kg, "
+            f"tinggi {profile.get('height_cm', 0):g} cm, "
+            f"dan MUAC/LILA {profile.get('muac_cm', 0):g} cm, "
+            f"model antropometri memberikan hasil skrining "
+            f"**{str(status.get('prediction', '-')).title()}**"
+            + (
+                f" dengan keyakinan "
+                f"{float(status['confidence']) * 100:.1f}%."
+                if status.get(
+                    "confidence"
+                ) is not None
+                else "."
+            )
         )
     ]
 
     if preds:
         top = preds[0]
         parts.append(
-            f"Foto makanan paling mungkin dikenali sebagai **{top['food']}** "
-            f"({top['confidence']*100:.1f}%)."
+            f"Foto makanan paling mungkin dikenali sebagai "
+            f"**{top.get('food', '-')}** "
+            f"({float(top.get('confidence', 0)) * 100:.1f}%)."
         )
 
     if adequacy:
         ranked = sorted(
             adequacy.items(),
-            key=lambda x: x[1]["contribution_percent"]
+            key=lambda item: float(
+                item[1].get(
+                    "contribution_percent",
+                    0,
+                )
+            ),
         )
+
         low = ranked[:3]
+
         low_text = ", ".join(
-            f"{DISPLAY_NAMES.get(k, k)} ({v['contribution_percent']:.1f}%)"
-            for k, v in low
+            (
+                f"{DISPLAY_NAMES.get(key, key)} "
+                f"({float(value.get('contribution_percent', 0)):.1f}%)"
+            )
+            for key, value
+            in low
         )
+
         parts.append(
-            f"Dari makanan yang dianalisis, kontribusi relatif paling rendah terhadap "
-            f"AKG kelompok umur terlihat pada **{low_text}**. "
-            "Ini berarti makanan tersebut belum banyak menyumbang nutrien tersebut; "
-            "bukan berarti anak terbukti mengalami defisiensi."
+            "Dari makanan yang dianalisis, kontribusi relatif "
+            "paling rendah terhadap AKG kelompok umur terlihat "
+            f"pada **{low_text}**."
         )
 
     if recs:
-        names = ", ".join(r["food"] for r in recs[:3])
+        names = ", ".join(
+            str(
+                item.get(
+                    "food",
+                    "-",
+                )
+            )
+            for item
+            in recs[:3]
+        )
+
         parts.append(
-            f"Sebagai kandidat pelengkap profil makanan, sistem menempatkan **{names}** "
-            "pada ranking teratas berdasarkan nutrien yang tersedia pada database rekomendasi."
+            f"Sistem menempatkan **{names}** "
+            "sebagai kandidat pelengkap pada peringkat teratas."
+        )
+
+    if result.get("warning"):
+        parts.append(
+            str(
+                result[
+                    "warning"
+                ]
+            )
         )
 
     parts.append(
-        "Gunakan hasil ini sebagai screening dan edukasi. Satu foto makanan tidak mewakili "
-        "seluruh asupan harian dan tidak menggantikan pemeriksaan tenaga kesehatan."
+        "Gunakan hasil ini sebagai skrining dan edukasi. "
+        "Satu foto makanan tidak mewakili seluruh asupan harian "
+        "dan tidak menggantikan pemeriksaan tenaga kesehatan."
     )
 
-    return "\n\n".join(parts)
+    return "\n\n".join(
+        parts
+    )

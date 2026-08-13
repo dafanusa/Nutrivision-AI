@@ -15,13 +15,7 @@ from .nutrition import (
     get_requirement,
     nutrient_lookup,
 )
-from .recommendation import (
-    RECOMMENDATION_ENGINE_VERSION,
-    RECOMMENDATION_METHOD_NAME,
-    RECOMMENDATION_SCORE_WEIGHTS,
-    age_group_label,
-    recommend_foods,
-)
+from .recommendation import recommend_foods
 
 
 CONVNEXT_MODEL_NAME = "convnextv2_tiny"
@@ -449,32 +443,6 @@ def predict_malnutrition(
     }
 
 
-def _run_age_aware_recommendation(
-    *,
-    adequacy: dict,
-    age_months: int,
-    rec_df: pd.DataFrame,
-    food_col: str,
-    rec_nutrient_cols: dict[str, str],
-    current_food: str | None = None,
-    top_n: int = 5,
-) -> list[dict]:
-    """
-    Menjalankan Age-Aware Nutrient Gap-Based Recommendation.
-
-    Recommendation engine menerima umur anak secara eksplisit agar kelompok umur
-    tidak hanya memengaruhi AKG, tetapi juga ikut memengaruhi pemeringkatan kandidat.
-    """
-    return recommend_foods(
-        adequacy=adequacy,
-        rec_df=rec_df,
-        food_col=food_col,
-        rec_nutrient_cols=rec_nutrient_cols,
-        age_months=int(age_months),
-        current_food=current_food,
-        top_n=top_n,
-    )
-
 def analyze_child_and_food(
     *,
     age_months,
@@ -495,25 +463,7 @@ def analyze_child_and_food(
     indo_rec_cols,
     ensemble_weights: Sequence[float] = DEFAULT_ENSEMBLE_WEIGHTS,
 ):
-    """
-    Decision layer utama NutriVision AI.
-
-    Versi ini sengaja dibuat stabil dan kompatibel dengan app.py saat ini:
-    satu foto diproses sebagai satu citra klasifikasi makanan.
-
-    Catatan:
-    Top-3 adalah tiga kemungkinan kelas untuk gambar yang sama,
-    bukan tiga makanan berbeda dalam satu piring.
-    """
-    if image is None:
-        raise ValueError("Gambar makanan belum tersedia.")
-
-    if not class_names:
-        raise ValueError("class_names kosong.")
-
-    # --------------------------------------------------------
-    # 1. Screening antropometri
-    # --------------------------------------------------------
+    """Decision layer utama NutriVision AI versi ensemble."""
     screening = predict_malnutrition(
         age_months,
         weight_kg,
@@ -522,9 +472,6 @@ def analyze_child_and_food(
         malnutrition_artifact,
     )
 
-    # --------------------------------------------------------
-    # 2. Prediksi makanan ensemble
-    # --------------------------------------------------------
     food_predictions = predict_food_ensemble(
         image=image,
         convnext_model=convnext_model,
@@ -534,17 +481,8 @@ def analyze_child_and_food(
         weights=ensemble_weights,
     )
 
-    if not food_predictions:
-        raise RuntimeError(
-            "Model makanan tidak menghasilkan prediksi."
-        )
-
     best_food = food_predictions[0]["food"]
 
-    # --------------------------------------------------------
-    # 3. Mapping nutrisi makanan teratas
-    # --------------------------------------------------------
-    # Prioritas pertama: knowledge base NutriCheck.
     food_nutrition = nutrient_lookup(
         best_food,
         nutricheck_kb,
@@ -552,33 +490,7 @@ def analyze_child_and_food(
         nutricheck_nutrient_cols,
     )
 
-    nutrition_source = "nutricheck_nutrition.csv"
-
-    # Fallback:
-    # kelas hasil model yang berasal dari perluasan dataset bisa saja tidak ada
-    # pada NutriCheck nutrition KB. Jika demikian, coba database nutrisi Indonesia
-    # yang juga sudah memiliki _food_key dan kolom nutrisi hasil build_recommendation_table.
-    if (
-        not isinstance(food_nutrition, dict)
-        or food_nutrition.get("status") != "ok"
-    ):
-        fallback_nutrition = nutrient_lookup(
-            best_food,
-            indo_rec_df,
-            indo_food_col,
-            indo_rec_cols,
-        )
-
-        if (
-            isinstance(fallback_nutrition, dict)
-            and fallback_nutrition.get("status") == "ok"
-        ):
-            food_nutrition = fallback_nutrition
-            nutrition_source = "indonesia_nutrition.csv"
-
-    conv_w, vit_w = _normalize_ensemble_weights(
-        ensemble_weights
-    )
+    conv_w, vit_w = _normalize_ensemble_weights(ensemble_weights)
 
     result = {
         "child_profile": {
@@ -590,23 +502,8 @@ def analyze_child_and_food(
         "nutrition_status": screening,
         "food_prediction": food_predictions,
         "food_nutrition": food_nutrition,
-        "nutrition_source": nutrition_source,
         "nutrient_contribution": {},
         "recommendations": [],
-        "recommendation_meta": {
-            "method": RECOMMENDATION_METHOD_NAME,
-            "engine_version": RECOMMENDATION_ENGINE_VERSION,
-            "age_gate": "hard_filter",
-            "age_group": age_group_label(int(age_months)),
-            "candidate_source": "indonesia_nutrition.csv",
-            "score_weights": dict(RECOMMENDATION_SCORE_WEIGHTS),
-            "interpretation": (
-                "Tahap pertama melakukan hard filter kesesuaian makanan berdasarkan umur dan "
-                "kelompok pangan. Hanya kandidat yang lolos gate kemudian diberi skor "
-                "berdasarkan gap nutrisi, cakupan, dan kualitas kelompok makanan. "
-                "Skor bukan diagnosis atau nilai mutu absolut makanan."
-            ),
-        },
         "ensemble": {
             "method": "weighted_soft_voting",
             "convnext_model": CONVNEXT_MODEL_NAME,
@@ -617,88 +514,32 @@ def analyze_child_and_food(
         },
     }
 
-    # --------------------------------------------------------
-    # 4. Validasi mapping nutrisi
-    # --------------------------------------------------------
-    if not isinstance(food_nutrition, dict):
-        result["warning"] = (
-            "Mapping nutrisi mengembalikan format yang tidak valid."
-        )
-        return result
-
     if food_nutrition.get("status") != "ok":
         result["warning"] = (
-            "Label makanan berhasil diprediksi, tetapi profil nutrisi tidak ditemukan "
-            "baik pada NutriCheck nutrition KB maupun database nutrisi Indonesia. "
-            "Analisis kontribusi AKG dan rekomendasi tidak dihitung untuk hasil ini."
+            "Label makanan berhasil diprediksi tetapi tidak menemukan mapping "
+            "nutrisi yang cukup mirip."
         )
         return result
 
-    nutrients = food_nutrition.get("nutrients", {})
-    if not nutrients:
-        result["warning"] = (
-            "Data makanan ditemukan tetapi profil nutrisinya kosong."
-        )
-        return result
-
-    # --------------------------------------------------------
-    # 5. Ambil AKG sesuai kelompok umur
-    # --------------------------------------------------------
-    requirement = get_requirement(
-        int(age_months),
-        requirements,
-    )
-
-    if not requirement:
-        result["warning"] = (
-            "Acuan kebutuhan gizi untuk kelompok umur ini "
-            "belum tersedia."
-        )
-        return result
-
-    # --------------------------------------------------------
-    # 6. Hitung kontribusi dan gap
-    # --------------------------------------------------------
+    requirement = get_requirement(age_months, requirements)
     adequacy = analyze_nutrient_contribution(
-        nutrients,
+        food_nutrition["nutrients"],
         requirement,
     )
 
-    # --------------------------------------------------------
-    # 7. Recommendation engine
-    # --------------------------------------------------------
-    if int(age_months) <= 5:
-        recommendations = []
-        result["recommendation_note"] = (
-            "Rekomendasi makanan padat tidak ditampilkan "
-            "untuk kelompok umur 0–5 bulan."
-        )
-    else:
-        recommendations = _run_age_aware_recommendation(
-            adequacy=adequacy,
-            age_months=int(age_months),
-            rec_df=indo_rec_df,
-            food_col=indo_food_col,
-            rec_nutrient_cols=indo_rec_cols,
-            current_food=best_food,
-            top_n=5,
-        )
+    recommendations = recommend_foods(
+        adequacy,
+        indo_rec_df,
+        indo_food_col,
+        indo_rec_cols,
+        top_n=5,
+    )
 
     result["requirement"] = requirement
     result["nutrient_contribution"] = adequacy
     result["recommendations"] = recommendations
-
-    if recommendations:
-        result["recommendation_meta"]["used_nutrients"] = recommendations[0].get(
-            "used_nutrients",
-            [],
-        )
-        result["recommendation_meta"]["candidate_count_returned"] = len(recommendations)
-    else:
-        result["recommendation_meta"]["used_nutrients"] = []
-        result["recommendation_meta"]["candidate_count_returned"] = 0
-
     return result
+
 
 def make_gradcam(image, model):
     """

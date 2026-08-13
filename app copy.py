@@ -1,7 +1,6 @@
 from pathlib import Path
 import base64
 import io
-import html
 import json
 from datetime import datetime
 
@@ -1521,7 +1520,7 @@ div[data-testid="stPlotlyChart"] { background:#FFF; border:1px solid #E7EAF0; bo
 }
 .ranking-head {
     display:grid;
-    grid-template-columns:78px 1.7fr .9fr .8fr;
+    grid-template-columns:52px 1.7fr .9fr .8fr;
     gap:12px;
     padding:0 12px 9px;
     color:#929CAF;
@@ -1530,18 +1529,9 @@ div[data-testid="stPlotlyChart"] { background:#FFF; border:1px solid #E7EAF0; bo
     text-transform:uppercase;
     letter-spacing:.045em;
 }
-.ranking-head > div {
-    white-space:nowrap;
-    word-break:normal;
-    overflow-wrap:normal;
-    min-width:0;
-}
-.ranking-head > div:first-child {
-    text-align:center;
-}
 .ranking-row {
     display:grid;
-    grid-template-columns:78px 1.7fr .9fr .8fr;
+    grid-template-columns:52px 1.7fr .9fr .8fr;
     gap:12px;
     align-items:center;
     padding:12px;
@@ -4483,100 +4473,6 @@ def food_display_name(value):
 # CHARTS
 # ============================================================
 
-
-def build_narrative_id(result):
-    """
-    Narasi hasil dalam Bahasa Indonesia dengan nama makanan tampilan
-    yang konsisten dengan dashboard.
-    """
-    profile = result.get("child_profile", {})
-    status = result.get("nutrition_status", {})
-    preds = result.get("food_prediction", [])
-    adequacy = result.get("nutrient_contribution", {})
-    recs = result.get("recommendations", [])
-    meta = result.get("recommendation_meta", {})
-
-    age_months = int(profile.get("age_months", 0))
-    age_label = age_text(age_months)
-
-    status_name = html.escape(
-        str(status.get("prediction", "-")).title()
-    )
-
-    parts = [
-        (
-            f"Untuk anak usia {html.escape(age_label)} dengan berat "
-            f"{float(profile.get('weight_kg', 0)):g} kg, tinggi "
-            f"{float(profile.get('height_cm', 0)):g} cm, dan MUAC/LILA "
-            f"{float(profile.get('muac_cm', 0)):g} cm, model antropometri "
-            f"memberikan hasil skrining <b>{status_name}</b>"
-            + (
-                f" dengan keyakinan {float(status['confidence']) * 100:.1f}%."
-                if status.get("confidence") is not None
-                else "."
-            )
-        )
-    ]
-
-    if preds:
-        top = preds[0]
-        display_food = html.escape(
-            food_display_name(top.get("food"))
-        )
-        parts.append(
-            f"Foto makanan paling mungkin dikenali sebagai "
-            f"<b>{display_food}</b> dengan probabilitas "
-            f"{float(top.get('confidence', 0)) * 100:.1f}%."
-        )
-
-    if adequacy:
-        ranked = sorted(
-            adequacy.items(),
-            key=lambda item: float(
-                item[1].get("contribution_percent", 0)
-            ),
-        )
-        low = ranked[:3]
-
-        low_text = ", ".join(
-            (
-                f"{html.escape(DISPLAY_NAMES.get(key, key))} "
-                f"({float(info.get('contribution_percent', 0)):.1f}%)"
-            )
-            for key, info in low
-        )
-
-        parts.append(
-            "Berdasarkan <b>nilai nutrisi referensi makanan</b>, kontribusi "
-            f"terhadap AKG yang paling rendah terlihat pada <b>{low_text}</b>. "
-            "Nilai ini menunjukkan kontribusi makanan yang dianalisis terhadap "
-            "acuan kelompok umur, bukan komposisi relatif makanan dan bukan bukti "
-            "bahwa anak mengalami kekurangan nutrisi."
-        )
-
-    if recs:
-        names = ", ".join(
-            html.escape(str(rec.get("food", "-")))
-            for rec in recs[:3]
-        )
-        group = html.escape(
-            str(meta.get("age_group", "-"))
-        )
-        parts.append(
-            f"Sebagai kandidat pelengkap, sistem menempatkan <b>{names}</b> "
-            f"pada peringkat teratas menggunakan pemeringkatan berbasis gap "
-            f"nutrisi dan kesesuaian kelompok umur {group}."
-        )
-
-    parts.append(
-        "Hasil ini digunakan untuk skrining dan edukasi. Satu foto makanan "
-        "tidak mewakili seluruh asupan harian dan tidak menggantikan "
-        "pemeriksaan tenaga kesehatan."
-    )
-
-    return "<br><br>".join(parts)
-
-
 def top3_chart(predictions):
     df = pd.DataFrame(predictions).copy()
 
@@ -4684,7 +4580,7 @@ def nutrient_radar(adequacy):
             r=values,
             theta=labels,
             fill="toself",
-            name="Kontribusi makanan",
+            name="Makanan",
             line=dict(color="#FFC21A", width=2.7),
             fillcolor="rgba(255,194,26,.18)",
             hovertemplate="<b>%{theta}</b><br>%{r:.1f}%<extra></extra>",
@@ -4695,7 +4591,7 @@ def nutrient_radar(adequacy):
         go.Scatterpolar(
             r=[50] * len(values),
             theta=labels,
-            name="Referensi 50% AKG",
+            name="Referensi 50%",
             line=dict(
                 color="#8A8A86",
                 width=1.15,
@@ -4707,7 +4603,7 @@ def nutrient_radar(adequacy):
 
     fig.update_layout(
         title=dict(
-            text="Kontribusi Nutrisi terhadap AKG",
+            text="Profil Nutrisi Makanan",
             x=.03,
             font=dict(size=15, color="#272727"),
         ),
@@ -5499,11 +5395,6 @@ if page == "Dashboard":
         bmi = status.get("bmi")
         adequacy = result.get("nutrient_contribution",{})
         recommendations = result.get("recommendations",[])
-        recommendation_meta = result.get("recommendation_meta", {})
-
-        pipeline_warning = result.get("warning")
-        if pipeline_warning:
-            st.warning(pipeline_warning)
 
         status_conf_raw = status.get("confidence")
         status_conf = (
@@ -5531,7 +5422,7 @@ if page == "Dashboard":
         st.markdown('<div class="panel">',unsafe_allow_html=True)
         st.markdown(
             """
-            <div class="section-kicker">Hasil Analisis AI</div>
+            <div class="section-kicker">AI Analysis Result</div>
             <div class="section-title">Ringkasan Hasil Analisis</div>
             <div class="section-sub">
                 Hasil berikut menggabungkan screening antropometri, klasifikasi makanan,
@@ -5610,17 +5501,14 @@ if page == "Dashboard":
                 st.markdown("#### 🔎 Rekomendasi Terbaik")
 
                 if recommendations:
-                    for i, rec in enumerate(recommendations[:3], 1):
-                        rec_age = rec.get("age_group", recommendation_meta.get("age_group", "-"))
-                        rec_category = rec.get("category_label", "menu")
+                    for i,rec in enumerate(recommendations[:3],1):
                         st.markdown(
                             f"""
                             <div class="rec-card">
                                 <div class="rec-rank">{i}</div>
                                 <div>
                                     <div class="rec-name">{rec["food"]}</div>
-                                    <div class="rec-reason">{rec.get("reason","")}<br>
-                                    <span style="font-size:.64rem;color:#8A95A8;">{rec_category} • kelompok umur {rec_age}</span></div>
+                                    <div class="rec-reason">{rec.get("reason","")}</div>
                                 </div>
                                 <div class="rec-score">{rec["score"]:.0f}/100</div>
                             </div>
@@ -5628,8 +5516,7 @@ if page == "Dashboard":
                             unsafe_allow_html=True,
                         )
                 else:
-                    note = result.get("recommendation_note")
-                    st.info(note or "Belum ada rekomendasi yang memenuhi kriteria.")
+                    st.info("Belum ada rekomendasi.")
 
             priority_html = "".join(
                 f'<span class="priority">✦ {x}</span>'
@@ -5640,7 +5527,7 @@ if page == "Dashboard":
                 f"""
                 <div class="insight">
                     <b>⭐ Insight & Rekomendasi untuk Anak</b><br><br>
-                    {build_narrative_id(result)}
+                    {build_narrative(result)}
                     <br>{priority_html}
                 </div>
                 """,
@@ -5693,7 +5580,7 @@ if page == "Dashboard":
             st.markdown(
                 """
                 <div class="section-kicker">
-                    Analisis Nutrisi
+                    Nutrition Analysis
                 </div>
                 <div class="section-title">
                     Analisis Profil Nutrisi
@@ -5741,12 +5628,6 @@ if page == "Dashboard":
             # =====================================================
             # GRAFIK KONTRIBUSI DAN GAP
             # =====================================================
-
-            if not adequacy:
-                st.info(
-                    "Profil nutrisi belum dapat dihitung untuk kelas makanan ini. "
-                    "Cek hasil pemetaan nama makanan ke knowledge base nutrisi."
-                )
 
             x, y = st.columns(
                 2,
@@ -5827,30 +5708,13 @@ if page == "Dashboard":
                     for x in nutrient_priorities(adequacy)
                 )
 
-                method_name = recommendation_meta.get(
-                    "method",
-                    "Age-First Food Suitability + Nutrient Gap Ranking",
-                )
-                engine_version = recommendation_meta.get(
-                    "engine_version",
-                    "3.0",
-                )
-                rec_age_group = recommendation_meta.get(
-                    "age_group",
-                    age_text(int(age_months)),
-                )
-
                 st.markdown(
                     f"""
                     <div class="rec-hero">
-                        <div class="rec-hero-title">Rekomendasi Makanan Prioritas <span style="font-size:.72rem;color:#7A8699;">• Engine v{engine_version}</span></div>
+                        <div class="rec-hero-title">Rekomendasi Makanan Prioritas</div>
                         <div class="rec-hero-text">
-                            Metode <b>{method_name}</b> menggunakan dua tahap. Pertama, sistem melakukan
-                            <b>filter keras kesesuaian makanan untuk kelompok umur {rec_age_group}</b>. Kandidat
-                            yang berupa bahan ambigu, minuman, camilan, produk olahan, atau tidak sesuai tahap
-                            makan tidak masuk ranking. Kedua, hanya kandidat yang lolos filter tersebut yang
-                            diperingkat berdasarkan gap nutrisi, cakupan nutrien, dan kualitas kelompok makanan.
-                            Fokus nutrisi saat ini: {", ".join(nutrient_priorities(adequacy)) or "kontribusi nutrisi umum"}.
+                            Recommendation engine menyusun kandidat makanan berdasarkan gap nutrisi
+                            yang perlu diprioritaskan. Fokus saat ini: {", ".join(nutrient_priorities(adequacy)) or "kontribusi nutrisi umum"}.
                         </div>
                         <div class="tag-row">{prio_html}</div>
                     </div>
@@ -5864,13 +5728,14 @@ if page == "Dashboard":
                         <div>
                             <div class="rec-visual-title">Ranking Kandidat Makanan</div>
                             <div class="rec-visual-sub">
-                                Semua kandidat di bawah sudah lolos filter makanan sesuai kelompok umur. Urutan kemudian ditentukan dari kecocokan gap nutrisi dan kualitas kelompok makanan. Cakupan menunjukkan jumlah nutrien prioritas yang didukung setiap kandidat.
+                                Urutan dibuat berdasarkan skor kecocokan internal.
+                                Coverage menunjukkan jumlah nutrien prioritas yang didukung setiap kandidat.
                             </div>
                         </div>
                         <div class="rec-legend">
                             <span>★ Ranking</span>
                             <span>Score 0–100</span>
-                            <span>Cakupan nutrisi</span>
+                            <span>Coverage nutrisi</span>
                         </div>
                     </div>
                     """,
@@ -5881,11 +5746,7 @@ if page == "Dashboard":
                 for rank, rec in enumerate(recommendations[:5], 1):
                     score = float(rec.get("score", 0))
                     coverage = int(rec.get("coverage", 0))
-                    coverage_total = int(rec.get("coverage_total", 0))
                     reason = str(rec.get("reason", ""))
-                    fit_score = float(rec.get("nutrient_fit_score", 0))
-                    age_score_rec = float(rec.get("age_score", 0))
-                    quality_score = float(rec.get("quality_score", 0))
                     top_class = " top" if rank == 1 else ""
 
                     ranking_rows.append(
@@ -5893,21 +5754,20 @@ if page == "Dashboard":
                         f'<div class="rank-number">#{rank}</div>'
                         f'<div class="rank-food">'
                         f'<div class="rank-food-name">{rec["food"]}</div>'
-                        f'<div class="rank-reason">{reason}<br>'
-                        f'<span style="font-size:.66rem;color:#98A2B3;">✓ Lolos filter umur • Gap nutrisi {fit_score:.0f} • Kualitas kandidat {quality_score:.0f}</span></div>'
+                        f'<div class="rank-reason">{reason}</div>'
                         f'</div>'
                         f'<div class="ranking-score">'
                         f'<div class="rank-score-label"><span>Skor</span><b>{score:.0f}/100</b></div>'
                         f'<div class="rank-progress"><span style="width:{max(0,min(score,100)):.1f}%"></span></div>'
                         f'</div>'
-                        f'<div class="rank-coverage">{coverage}/{coverage_total or "-"} nutrien<br>tercakup</div>'
+                        f'<div class="rank-coverage">{coverage} nutrien<br>tercakup</div>'
                         f'</div>'
                     )
 
                 st.markdown(
                     '<div class="ranking-board">'
                     '<div class="ranking-head">'
-                    '<div>Peringkat</div><div>Makanan</div><div>Skor</div><div>Cakupan</div>'
+                    '<div>Rank</div><div>Makanan</div><div>Skor</div><div>Coverage</div>'
                     '</div>'
                     + "".join(ranking_rows)
                     + '</div>',
@@ -5917,23 +5777,13 @@ if page == "Dashboard":
                 cols = st.columns(min(3, len(recommendations)))
                 for i, rec in enumerate(recommendations[:3]):
                     with cols[i]:
-                        fit_score = float(rec.get("nutrient_fit_score", 0))
-                        age_score_rec = float(rec.get("age_score", 0))
-                        coverage_score = float(rec.get("coverage_score", 0))
-                        quality_score = float(rec.get("quality_score", 0))
-                        category_label = rec.get("category_label", "menu")
                         st.markdown(
                             f"""
                             <div class="recommend-card-rich">
                                 <div class="rec-rank-badge">🥗 #{i+1} &nbsp; Kandidat Utama</div>
                                 <div class="food">{rec["food"]}</div>
                                 <div class="score">{rec["score"]:.0f}/100</div>
-                                <div class="reason">{rec.get("reason", "Direkomendasikan untuk membantu melengkapi gap nutrisi prioritas.")}</div>
-                                <div style="margin-top:10px;font-size:.67rem;color:#8792A6;line-height:1.6;">
-                                    {category_label}<br>
-                                    Gap nutrisi {fit_score:.0f} • Cakupan {coverage_score:.0f}<br>
-                                    ✓ Lolos filter umur • Kualitas kandidat {quality_score:.0f}
-                                </div>
+                                <div class="reason">{rec.get("reason", "Direkomendasikan untuk membantu menutup gap nutrisi prioritas.")}</div>
                             </div>
                             """,
                             unsafe_allow_html=True,
@@ -5956,16 +5806,12 @@ if page == "Dashboard":
                             )
                 st.markdown(
                     '<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;">'
-                    '<b>Cara membaca rekomendasi:</b> tahap pertama adalah <b>hard age-food gate</b>; kandidat yang tidak sesuai '
-                    'kelompok umur atau berupa bahan/minuman/camilan/produk ambigu langsung dikeluarkan. Setelah lolos, '
-                    'skor ranking dihitung dari 70% kecocokan gap nutrisi + 15% cakupan nutrien + 15% kualitas kelompok makanan. '
-                    'Bobot tersebut adalah aturan desain ranking internal, bukan bobot klinis. Gap berasal dari makanan yang dianalisis '
-                    'terhadap acuan kelompok umur dan bukan diagnosis kekurangan nutrisi anak.'
+                    'Skor rekomendasi adalah skor kecocokan internal berbasis gap nutrisi, bukan nilai mutu absolut suatu makanan.'
                     '</div>',
                     unsafe_allow_html=True,
                 )
             else:
-                st.info(result.get("recommendation_note") or "Mesin rekomendasi belum menghasilkan kandidat yang memenuhi kriteria.")
+                st.info("Recommendation engine belum menghasilkan kandidat.")
 
         with tab4:
             try:
@@ -5976,12 +5822,11 @@ if page == "Dashboard":
                 overlay = overlay_gradcam(image, heat)
                 colored_heat = colorize_gradcam(heat)
 
-                pred_label_raw = (
+                pred_label = (
                     class_names[idx]
                     if 0 <= idx < len(class_names)
                     else f"Kelas {idx}"
                 )
-                pred_label = food_display_name(pred_label_raw)
 
                 st.markdown(
                     f"""
@@ -5999,7 +5844,7 @@ if page == "Dashboard":
                             <div class="xai-stat-value">{pred_label}</div>
                         </div>
                         <div class="xai-stat">
-                            <div class="xai-stat-label">Keyakinan</div>
+                            <div class="xai-stat-label">Confidence</div>
                             <div class="xai-stat-value">{conf*100:.2f}%</div>
                         </div>
                         <div class="xai-stat">
@@ -6113,7 +5958,7 @@ if page == "Dashboard":
                 pd.DataFrame(
                     [
                         {
-                            "Kelas": food_display_name(p["food"]),
+                            "Kelas": p["food"],
                             "Ensemble (%)": round(p["confidence"] * 100, 2),
                             "ConvNeXt (%)": round(p.get("convnext_confidence", 0) * 100, 2),
                             "NoisyViT (%)": round(p.get("noisyvit_confidence", 0) * 100, 2),
@@ -6133,7 +5978,7 @@ if page == "Dashboard":
                     <div class="flow-node"><div class="num">03</div><div class="title">Ensemble Prediction</div><div class="text">Dua probabilitas keluaran digabung menggunakan weighted soft voting untuk menghasilkan prediksi final 53 kelas.</div></div>
                     <div class="flow-node"><div class="num">04</div><div class="title">Nutrition Mapping</div><div class="text">Kelas makanan dipetakan ke knowledge base nutrisi, lalu dibandingkan dengan AKG kelompok umur.</div></div>
                     <div class="flow-node"><div class="num">05</div><div class="title">Gap Analysis</div><div class="text">Sistem menghitung kontribusi dan gap nutrisi prioritas dari makanan yang terdeteksi.</div></div>
-                    <div class="flow-node"><div class="num">06</div><div class="title">Rekomendasi Berbasis Umur & Gap</div><div class="text">Kandidat makanan diranking berdasarkan gap nutrisi, cakupan, kesesuaian kelompok umur, dan kualitas kategori makanan.</div></div>
+                    <div class="flow-node"><div class="num">06</div><div class="title">Recommendation Engine</div><div class="text">Engine memberi ranking makanan pendamping yang lebih relevan dengan kebutuhan nutrisi.</div></div>
                 </div>
                 ''',
                 unsafe_allow_html=True,
