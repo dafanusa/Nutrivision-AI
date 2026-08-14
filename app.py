@@ -3,6 +3,7 @@ import base64
 import io
 import html
 import json
+import os
 from datetime import datetime
 
 import numpy as np
@@ -4576,6 +4577,128 @@ def build_narrative_id(result):
 
     return "<br><br>".join(parts)
 
+def build_meal_plan(detected_food_display, recommendations, priorities):
+    """Rencana menu harian sederhana (offline, tanpa API)."""
+    slots = ["Sarapan", "Makan Siang", "Camilan Sore", "Makan Malam"]
+    pool = [str(r.get("food", "-")) for r in (recommendations or []) if r.get("food")]
+    reasons = {
+        str(r.get("food", "")): str(r.get("reason", ""))
+        for r in (recommendations or [])
+    }
+
+    plan = []
+    idx = 0
+    for slot in slots:
+        if slot == "Makan Siang" and detected_food_display and detected_food_display != "-":
+            food = detected_food_display
+            reason = "Menu yang baru saja dianalisis."
+        elif idx < len(pool):
+            food = pool[idx]
+            reason = reasons.get(food, "Membantu melengkapi gap nutrisi prioritas.")
+            idx += 1
+        else:
+            food = "Menu bergizi seimbang"
+            reason = "Lengkapi dengan sumber protein, sayur, dan buah."
+        plan.append({"waktu": slot, "menu": food, "alasan": reason})
+    return plan
+
+
+def generate_ai_meal_plan(profile, status_label, priorities, detected_food, recommendations):
+    """
+    Rencana menu harian via Gemini (opsional).
+    Return dict {"meals":[...], "catatan":...} atau None bila tidak ada API key / gagal,
+    sehingga app otomatis jatuh ke build_meal_plan().
+    """
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        api_key = None
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception:
+        return None
+
+    age_months = int(profile.get("age_months", 0))
+    prio_text = ", ".join(priorities) if priorities else "gizi seimbang"
+    rec_text = ", ".join(
+        str(r.get("food", "")) for r in (recommendations or [])[:5]
+    ) or "-"
+
+    # Tentukan aturan tahap makan berdasarkan umur.
+    if age_months < 6:
+        stage = (
+            "Bayi di bawah 6 bulan: HANYA ASI/susu formula. JANGAN memberi makanan padat "
+            "apa pun. Untuk tiap waktu makan, tulis pemberian ASI/susu, bukan menu makanan."
+        )
+    elif age_months < 9:
+        stage = (
+            "Bayi 6-8 bulan (MPASI awal): makanan lumat/puree yang sangat halus. "
+            "Contoh: bubur saring, puree buah/sayur, hati ayam lumat. TANPA garam, gula, "
+            "madu, gorengan, makanan keras, kacang utuh, atau makanan pedas/berbumbu tajam."
+        )
+    elif age_months < 12:
+        stage = (
+            "Bayi 9-11 bulan (MPASI lanjutan): makanan lembik yang dicincang halus / "
+            "finger food lunak. Contoh: nasi tim lembek, sayur kukus lunak, ikan/ayam "
+            "cincang halus tanpa duri/tulang. TANPA garam berlebih, gula, madu, gorengan "
+            "keras, atau makanan yang mudah tersedak."
+        )
+    elif age_months < 24:
+        stage = (
+            "Anak 12-23 bulan: makanan keluarga bertekstur lunak, potongan kecil, porsi "
+            "kecil. Boleh mulai variatif, tetapi rendah garam dan gula, hindari gorengan "
+            "berminyak, makanan pedas, dan makanan keras yang berisiko tersedak."
+        )
+    else:
+        stage = (
+            "Anak di atas 2 tahun: makanan keluarga bergizi seimbang dengan porsi anak, "
+            "tetap batasi garam, gula, dan gorengan berlebihan."
+        )
+
+    prompt = f"""Kamu ahli gizi anak. Susun rencana menu harian (Bahasa Indonesia) yang
+AMAN dan SESUAI USIA anak.
+
+Data anak:
+- Usia: {age_months} bulan
+- Aturan tahap makan yang WAJIB dipatuhi: {stage}
+- Status skrining gizi: {status_label}
+- Nutrien prioritas (kontribusi terendah): {prio_text}
+- Kandidat makanan pendamping dari sistem (boleh diabaikan bila tidak sesuai usia): {rec_text}
+
+Aturan penting:
+- Menu WAJIB mengikuti aturan tahap makan sesuai usia di atas. Ini prioritas nomor satu,
+  lebih penting daripada mengejar nutrien prioritas.
+- Untuk bayi/balita, gunakan tekstur, porsi, dan bahan yang benar-benar sesuai umur.
+- Hindari bahan berisiko tersedak, tinggi garam/gula, madu (di bawah 1 tahun), dan
+  makanan yang tidak lazim untuk anak seusia itu.
+
+Buat menu untuk Sarapan, Makan Siang, Camilan Sore, dan Makan Malam. Tiap waktu makan:
+nama menu ringkas + alasan singkat (kaitkan dengan usia dan nutrien prioritas). Gunakan
+bahan umum dan terjangkau di Indonesia.
+
+Jawab HANYA JSON valid:
+{{"meals":[{{"waktu":"Sarapan","menu":"...","alasan":"..."}}],"catatan":"satu kalimat"}}"""
+    try:
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt,
+        )
+        text = (resp.text or "").strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        print("=== GEMINI GAGAL ===")
+        print(repr(e))
+        print("====================")
+        return None
 
 def top3_chart(predictions):
     df = pd.DataFrame(predictions).copy()
@@ -4637,92 +4760,92 @@ def top3_chart(predictions):
 
     return fig
 
-def nutrient_radar(adequacy):
+def nutrient_radar(result):
     """
-    Radar diperbaiki agar label tidak nabrak.
-    - legend dipindah ke bawah
-    - domain radar diperkecil
-    - margin diperbesar
-    - label dibuat konsisten dan ringkas
+    Radar KANDUNGAN NUTRISI (bukan %AKG).
+    Nilai dinormalisasi 0-100 relatif terhadap nutrien tertinggi agar bentuk
+    radar tetap terbaca dan garis kuning tegas. Hover tetap menampilkan angka
+    dan satuan asli supaya tidak menyesatkan.
     """
+    nutrition = result.get("food_nutrition", {})
+    nutrients = nutrition.get("nutrients", {}) if nutrition.get("status") == "ok" else {}
 
-    if not adequacy:
+    if not nutrients:
         return go.Figure()
 
     pretty = {
         "calories": "Energi",
         "protein": "Protein",
         "carbohydrate": "Karbohidrat",
+        "fat": "Lemak",
         "iron": "Zat Besi",
         "calcium": "Kalsium",
         "vitamin_a": "Vit A",
         "vitamin_c": "Vit C",
-        "fat": "Lemak",
     }
 
-    rows = []
+    labels = []
+    raw_values = []
+    units = []
 
-    for key, info in adequacy.items():
-        rows.append(
-            (
-                pretty.get(key, DISPLAY_NAMES.get(key, key)),
-                min(max(float(info.get("contribution_percent", 0)), 0), 100),
-            )
-        )
+    for key, value in nutrients.items():
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            continue
+        labels.append(pretty.get(key, DISPLAY_NAMES.get(key, key)))
+        raw_values.append(amount)
+        units.append(NUTRIENT_UNITS.get(key, ""))
 
-    labels = [x[0] for x in rows]
-    values = [x[1] for x in rows]
+    if not labels:
+        return go.Figure()
 
-    if labels:
-        labels = labels + [labels[0]]
-        values = values + [values[0]]
+    max_val = max(raw_values) or 1.0
+    norm_values = [v / max_val * 100 for v in raw_values]
+
+    # Tutup poligon (sambungkan titik terakhir ke titik pertama).
+    labels_c = labels + [labels[0]]
+    norm_c = norm_values + [norm_values[0]]
+    raw_c = raw_values + [raw_values[0]]
+    units_c = units + [units[0]]
+
+    customdata = [[r, u] for r, u in zip(raw_c, units_c)]
 
     fig = go.Figure()
 
     fig.add_trace(
         go.Scatterpolar(
-            r=values,
-            theta=labels,
+            r=norm_c,
+            theta=labels_c,
             fill="toself",
-            name="Kontribusi makanan",
-            line=dict(color="#FFC21A", width=2.7),
-            fillcolor="rgba(255,194,26,.18)",
-            hovertemplate="<b>%{theta}</b><br>%{r:.1f}%<extra></extra>",
-        )
-    )
-
-    fig.add_trace(
-        go.Scatterpolar(
-            r=[50] * len(values),
-            theta=labels,
-            name="Referensi 50% AKG",
-            line=dict(
-                color="#8A8A86",
-                width=1.15,
-                dash="dash",
-            ),
-            hoverinfo="skip",
+            name="Kandungan nutrisi",
+            line=dict(color="#F5B800", width=3.4),
+            fillcolor="rgba(255,201,40,.28)",
+            marker=dict(size=6, color="#F5B800"),
+            customdata=customdata,
+            hovertemplate="<b>%{theta}</b><br>%{customdata[0]:.1f} %{customdata[1]}<extra></extra>",
         )
     )
 
     fig.update_layout(
         title=dict(
-            text="Kontribusi Nutrisi terhadap AKG",
+            text="Kandungan Nutrisi Makanan",
             x=.03,
             font=dict(size=15, color="#272727"),
         ),
         height=355,
-        margin=dict(l=65, r=65, t=62, b=62),
+        margin=dict(l=65, r=65, t=62, b=52),
         polar=dict(
-            domain=dict(x=[.14, .86], y=[.16, .90]),
+            domain=dict(x=[.14, .86], y=[.14, .90]),
             bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(
-                range=[0,100],
-                tickvals=[25,50,75,100],
-                tickfont=dict(size=8, color="#948C81"),
+                range=[0, 100],
+                tickvals=[25, 50, 75, 100],
+                tickfont=dict(size=8, color="#B4ADA1"),
                 gridcolor="#EAE4D5",
                 linecolor="#EAE4D5",
                 angle=90,
+                showticklabels=False,
             ),
             angularaxis=dict(
                 tickfont=dict(size=10, color="#6B655D"),
@@ -4730,19 +4853,11 @@ def nutrient_radar(adequacy):
                 linecolor="#EEE7D8",
             ),
         ),
-        legend=dict(
-            orientation="h",
-            x=.5,
-            xanchor="center",
-            y=-.12,
-            yanchor="top",
-            font=dict(size=9),
-        ),
+        showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
     )
 
     return fig
-
 
 def history_status_chart(history):
     if not history:
@@ -5363,20 +5478,36 @@ if page == "Dashboard":
 
             image = None
 
-            # Sebelum ada foto: tampilkan uploader kuning.
-            # Sesudah foto dipilih: uploader disembunyikan dan diganti preview.
             if st.session_state.food_image_bytes is None:
-                uploaded = st.file_uploader(
-                    "Upload foto",
-                    type=["jpg", "jpeg", "png", "webp"],
+                source = st.radio(
+                    "Sumber gambar",
+                    ["📁 Upload", "📷 Kamera"],
+                    horizontal=True,
                     label_visibility="collapsed",
-                    key="food_upload_widget",
+                    key="food_source_mode",
                 )
 
-                if uploaded is not None:
-                    st.session_state.food_image_bytes = uploaded.getvalue()
-                    st.session_state.food_image_name = uploaded.name
-                    st.rerun()
+                if source == "📁 Upload":
+                    uploaded = st.file_uploader(
+                        "Upload foto",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        label_visibility="collapsed",
+                        key="food_upload_widget",
+                    )
+                    if uploaded is not None:
+                        st.session_state.food_image_bytes = uploaded.getvalue()
+                        st.session_state.food_image_name = uploaded.name
+                        st.rerun()
+                else:
+                    shot = st.camera_input(
+                        "Ambil foto makanan",
+                        label_visibility="collapsed",
+                        key="food_camera_widget",
+                    )
+                    if shot is not None:
+                        st.session_state.food_image_bytes = shot.getvalue()
+                        st.session_state.food_image_name = "kamera.jpg"
+                        st.rerun()
 
             else:
                 try:
@@ -5399,12 +5530,14 @@ if page == "Dashboard":
                         st.session_state.food_image_bytes = None
                         st.session_state.food_image_name = None
                         st.session_state.pop("food_upload_widget", None)
+                        st.session_state.pop("food_camera_widget", None)
                         st.rerun()
 
                 except Exception:
                     st.session_state.food_image_bytes = None
                     st.session_state.food_image_name = None
                     st.session_state.pop("food_upload_widget", None)
+                    st.session_state.pop("food_camera_widget", None)
                     st.rerun()
 
             st.markdown(
@@ -5585,8 +5718,8 @@ if page == "Dashboard":
 
         st.markdown("</div>",unsafe_allow_html=True)
 
-        tab1,tab2,tab3,tab4,tab5 = st.tabs(
-            ["Ringkasan","Nutrisi & Gap","Rekomendasi Makanan","Grad-CAM","Detail Model"]
+        tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs(
+            ["Ringkasan","Nutrisi & Gap","Rekomendasi Makanan","Grad-CAM","Detail Model","Menu Harian"]
         )
 
         with tab1:
@@ -5594,7 +5727,7 @@ if page == "Dashboard":
 
             with a:
                 st.plotly_chart(
-                    nutrient_radar(adequacy),
+                    nutrient_radar(result),
                     use_container_width=True,
                     config={"displayModeBar":False},
                 )
@@ -6142,6 +6275,74 @@ if page == "Dashboard":
             st.caption(
                 "Detail model menampilkan keluaran ensemble, kontribusi masing-masing branch, serta alur pemrosesan NutriVision AI secara ringkas."
             )
+        
+        with tab6:
+            st.markdown(
+                """
+                <div class="section-kicker">Menu Harian</div>
+                <div class="section-title">Rencana Menu Sehari</div>
+                <div class="section-sub">
+                    Contoh susunan makan sehari untuk membantu melengkapi nutrien
+                    prioritas anak. Bersifat edukatif, bukan resep diet klinis.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            plan_priorities = nutrient_priorities(adequacy)
+
+            with st.spinner("Menyusun menu harian..."):
+                ai_plan = generate_ai_meal_plan(
+                    st.session_state.child_profile,
+                    str(status["prediction"]),
+                    plan_priorities,
+                    top_food_display,
+                    recommendations,
+                )
+
+            if ai_plan and ai_plan.get("meals"):
+                meals = ai_plan["meals"]
+                closing = str(ai_plan.get("catatan", ""))
+                source_label = "✨ Disusun oleh AI (Gemini)"
+            else:
+                meals = build_meal_plan(top_food_display, recommendations, plan_priorities)
+                closing = "Menu disusun otomatis dari recommendation engine. Aktifkan mode AI (Gemini) untuk hasil lebih personal."
+                source_label = "⚙️ Disusun otomatis (offline)"
+
+            focus_text = ", ".join(plan_priorities) if plan_priorities else "gizi seimbang umum"
+
+            st.markdown(
+                f'<div class="rec-hero"><div class="rec-hero-title">{source_label}</div>'
+                f'<div class="rec-hero-text">Fokus nutrisi prioritas hari ini: <b>{html.escape(focus_text)}</b>.</div></div>',
+                unsafe_allow_html=True,
+            )
+
+            for m in meals:
+                waktu = html.escape(str(m.get("waktu", "-")))
+                menu = html.escape(str(m.get("menu", "-")))
+                alasan = html.escape(str(m.get("alasan", "")))
+                st.markdown(
+                    f'<div class="rec-card"><div class="rec-rank">🍽️</div>'
+                    f'<div><div class="rec-name">{waktu} — {menu}</div>'
+                    f'<div class="rec-reason">{alasan}</div></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            if closing:
+                st.markdown(
+                    f'<div class="dark-note" style="color:#59677E;background:#FBFCFE;'
+                    f'border:1px solid #E8EDF5;margin-top:10px;">{html.escape(closing)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
+                '<div class="action-note" style="margin-top:12px;">'
+                '<span class="note-icon">◇</span>'
+                '<span>Rencana ini edukatif. Untuk anak dengan indikasi gangguan gizi, '
+                'konsultasikan menu dengan dokter anak atau ahli gizi.</span></div>',
+                unsafe_allow_html=True,
+            )
+            
 
 
 # ============================================================

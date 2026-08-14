@@ -140,38 +140,59 @@ def _attach_transform(model: torch.nn.Module, backbone: torch.nn.Module):
     model._nutrivision_data_config = data_config
 
 
-def load_convnext_model(
-    path: str | Path,
-    num_classes: int = FOOD_NUM_CLASSES,
-    device: str | torch.device | None = None,
-):
-    """Rekonstruksi ConvNeXt V2 Tiny dan muat checkpoint 53 kelas."""
+def load_convnext_model(checkpoint_path, num_classes=None):
     import timm
 
-    device = _resolve_device(device)
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+
+    # 1) Ambil state_dict dari wrapper yang benar.
+    if isinstance(ckpt, dict):
+        state = None
+        for k in ("model_state", "state_dict", "model", "model_state_dict"):
+            if k in ckpt and isinstance(ckpt[k], dict):
+                state = ckpt[k]
+                break
+        if state is None:
+            state = ckpt  # asumsikan ckpt itu sendiri sudah state_dict
+        # Jumlah class ikut dari checkpoint bila tidak diberikan eksplisit.
+        if num_classes is None:
+            num_classes = int(ckpt.get("num_classes", 0)) or None
+    else:
+        state = ckpt
+
+    # 2) Bersihkan prefix umum bila ada (module. / model.).
+    cleaned = {}
+    for key, val in state.items():
+        nk = key
+        for p in ("module.", "model."):
+            if nk.startswith(p):
+                nk = nk[len(p):]
+        cleaned[nk] = val
+    state = cleaned
+
+    # 3) Tentukan num_classes dari head checkpoint bila masih kosong.
+    if num_classes is None:
+        if "head.fc.weight" in state:
+            num_classes = state["head.fc.weight"].shape[0]
+        else:
+            raise ValueError("num_classes tidak diketahui dan head.fc.weight tidak ditemukan.")
+
+    # 4) Bangun arsitektur yang cocok lalu muat bobot.
     model = timm.create_model(
-        CONVNEXT_MODEL_NAME,
+        "convnextv2_tiny",
         pretrained=False,
         num_classes=num_classes,
     )
 
-    state_dict = _extract_state_dict(_load_checkpoint(path))
-
-    head_weight = state_dict.get("head.fc.weight")
-    if head_weight is None:
-        raise ValueError(
-            "Checkpoint ConvNeXt tidak memiliki `head.fc.weight`."
-        )
-    if int(head_weight.shape[0]) != int(num_classes):
-        raise ValueError(
-            "Jumlah kelas ConvNeXt tidak cocok: "
-            f"checkpoint={int(head_weight.shape[0])}, config={num_classes}."
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        # Diagnostik jelas kalau masih ada yang tidak cocok.
+        raise RuntimeError(
+            f"State_dict tidak sepenuhnya cocok.\n"
+            f"Missing: {missing}\nUnexpected: {unexpected}"
         )
 
-    model.load_state_dict(state_dict, strict=True)
-    model.to(device)
     model.eval()
-    _attach_transform(model, model)
     return model
 
 
