@@ -4604,78 +4604,6 @@ def build_meal_plan(detected_food_display, recommendations, priorities, meal_tim
     return plan
 
 
-def generate_ai_pairings(profile, status_label, priorities, detected_food, recommendations):
-    """
-    Rekomendasi makanan/minuman PENDAMPING yang cocok dipadukan dengan `detected_food`
-    untuk melengkapi nutrisi. Return list [{"nama","jenis","alasan"}] atau None (fallback offline).
-    """
-    api_key = None
-    try:
-        api_key = st.secrets.get("GEMINI_API_KEY")
-    except Exception:
-        api_key = None
-    if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        return None
-
-    try:
-        from google import genai
-    except Exception:
-        return None
-
-    age_months = int(profile.get("age_months", 0))
-    prio_text = ", ".join(priorities) if priorities else "gizi seimbang"
-    rec_text = ", ".join(str(r.get("food", "")) for r in (recommendations or [])[:6]) or "-"
-
-    if age_months < 24:
-        age_rule = ("anak di bawah 2 tahun: tekstur lunak, tanpa/rendah garam & gula, tanpa madu, "
-                    "hindari gorengan dan makanan mudah tersedak.")
-    else:
-        age_rule = "anak balita: porsi anak, batasi garam/gula/gorengan berlebihan."
-
-    prompt = f"""Kamu ahli gizi anak. Anak (usia {age_months} bulan) sedang makan "{detected_food}".
-Sarankan 3 makanan/minuman PENDAMPING yang cocok DISANDINGKAN dengan "{detected_food}" untuk
-melengkapi nutrisi yang masih kurang: {prio_text}.
-
-Aturan (WAJIB masuk akal dan realistis untuk sekali makan):
-- Pendamping harus WAJAR dan LAZIM dimakan bersama "{detected_food}" dalam satu porsi makan anak.
-- Perhatikan bahwa "{detected_food}" sudah menyumbang sebagian gizi. JANGAN menambah sumber yang
-  sudah berlebihan. Contoh: jika "{detected_food}" sudah tinggi karbohidrat, JANGAN menyarankan
-  sumber karbohidrat lain (nasi, mie, jagung, kentang) sebagai pendamping.
-- Utamakan pelengkap ringan yang menutup kekurangan: lauk protein porsi kecil, sayur, buah potong,
-  atau segelas minuman (susu/air). Ingat anak usia {age_months} bulan porsinya kecil dan cepat kenyang.
-- Hindari menumpuk makanan berat; total "{detected_food}" + pendamping harus realistis untuk sekali makan.
-- Sesuai usia: {age_rule}. Hindari gorengan berminyak dan bahan berisiko tersedak untuk balita.
-- JANGAN menyarankan "{detected_food}" itu sendiri atau menu berat yang mirip.
-- Setiap saran: nama, jenis ("makanan" atau "minuman"), dan alasan singkat (nutrisi apa yang dilengkapi).
-- Boleh terinspirasi kandidat sistem: {rec_text}, tetapi utamakan yang benar-benar cocok & realistis dipadukan dengan "{detected_food}".
-
-Selain 3 saran, tulis juga satu kalimat "ringkasan" ramah untuk orang tua, contoh gaya:
-"{detected_food} paling baik dipadukan dengan A dan B, terutama untuk anak usia {age_months} bulan, karena ...".
-
-Jawab HANYA JSON valid:
-{{"pairings":[{{"nama":"...","jenis":"makanan","alasan":"..."}}],"ringkasan":"..."}}"""
-
-    for model_name in ("gemini-flash-latest", "gemini-flash-lite-latest"):
-        for attempt in range(2):
-            try:
-                client = genai.Client(api_key=api_key)
-                resp = client.models.generate_content(model=model_name, contents=prompt)
-                text = (resp.text or "").strip().replace("```json", "").replace("```", "").strip()
-                data = json.loads(text)
-                if data.get("pairings"):
-                    return data
-            except Exception as e:
-                msg = repr(e)
-                if any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                else:
-                    break
-    return None
-
-
 def generate_ai_meal_plan(profile, status_label, priorities, detected_food, recommendations, meal_time):
     """
     Rencana menu harian via Gemini (opsional).
@@ -4791,13 +4719,8 @@ Aturan:
 Keluarkan waktu makan berikut secara berurutan: "{meal_time}" (isi "{detected_food}"),
 lalu {other_text}. Gunakan label "waktu" persis seperti nama-nama itu (termasuk "(besok)" bila ada).
 
-Tambahkan juga "ringkasan_gizi": penilaian KUALITATIF jujur (BUKAN angka gram/kalori) tentang
-apakah rangkaian menu ini sudah memenuhi gizi sehari - sebutkan nutrien apa yang sudah tercakup
-(mis. protein hewani & nabati, sumber kalsium, sayur, buah) dan nutrien apa yang MASIH perlu
-diperhatikan. Tulis 2-3 kalimat, ramah untuk orang tua. JANGAN mengarang angka.
-
 Jawab HANYA JSON valid:
-{{"meals":[{{"waktu":"Sarapan","menu":"...","alasan":"..."}}],"catatan":"satu kalimat","ringkasan_gizi":"2-3 kalimat"}}"""
+{{"meals":[{{"waktu":"Sarapan","menu":"...","alasan":"..."}}],"catatan":"satu kalimat"}}"""
 
     try:
         client = genai.Client(api_key=api_key)
@@ -5746,8 +5669,8 @@ if page == "Dashboard":
         st.markdown(result_cards_html, unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        tab1, tab2, tab4, tab5, tab6 = st.tabs(
-            ["Ringkasan", "Nutrisi & Gap", "Grad-CAM", "Detail Model", "Menu Harian"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            ["Ringkasan", "Nutrisi & Gap", "Rekomendasi Makanan", "Grad-CAM", "Detail Model", "Menu Harian"]
         )
 
         with tab1:
@@ -5758,51 +5681,15 @@ if page == "Dashboard":
                 st.plotly_chart(top3_chart(preds), use_container_width=True, config={"displayModeBar": False})
             with c:
                 st.markdown("#### 🔎 Rekomendasi Terbaik")
-                st.caption(f"Pendamping yang cocok dipadukan dengan {top_food_display}")
-
-                pair_key = f"{st.session_state.get('last_analysis_id')}|{top_food_display}"
-                if st.session_state.get("pairings_key") != pair_key:
-                    with st.spinner("Menyusun rekomendasi pendamping..."):
-                        st.session_state.pairings = generate_ai_pairings(
-                            st.session_state.child_profile,
-                            str(status["prediction"]),
-                            nutrient_priorities(adequacy),
-                            top_food_display,
-                            recommendations,
-                        )
-                    st.session_state.pairings_key = pair_key
-                pairing_data = st.session_state.get("pairings")
-                pairings = (pairing_data or {}).get("pairings") if isinstance(pairing_data, dict) else pairing_data
-                pairing_summary = (pairing_data or {}).get("ringkasan") if isinstance(pairing_data, dict) else None
-
-                if pairings:
-                    icon_map = {"minuman": "🥤", "makanan": "🍽️"}
-                    for pr in pairings[:3]:
-                        nama = html.escape(str(pr.get("nama", "-")))
-                        jenis = str(pr.get("jenis", "makanan")).strip().lower()
-                        alasan = html.escape(str(pr.get("alasan", "")))
-                        icon = icon_map.get(jenis, "🍽️")
-                        st.markdown(f"""<div class="rec-card"><div class="rec-rank">{icon}</div><div><div class="rec-name">{nama}</div><div class="rec-reason">{alasan}<br><span style="font-size:.64rem;color:#8A95A8;">pendamping {html.escape(jenis)} • cocok dengan {html.escape(top_food_display)}</span></div></div></div>""", unsafe_allow_html=True)
-                    st.caption("Disusun oleh AI Tim .....")
-                elif recommendations:
+                if recommendations:
                     for i, rec in enumerate(recommendations[:3], 1):
+                        rec_age = rec.get("age_group", recommendation_meta.get("age_group", "-"))
                         rec_category = rec.get("category_label", "menu")
-                        st.markdown(f"""<div class="rec-card"><div class="rec-rank">{i}</div><div><div class="rec-name">{rec["food"]}</div><div class="rec-reason">{rec.get("reason","")}<br><span style="font-size:.64rem;color:#8A95A8;">{rec_category} • pendamping</span></div></div><div class="rec-score">{rec["score"]:.0f}/100</div></div>""", unsafe_allow_html=True)
-                    st.caption("⚙️ Mode offline — aktifkan Gemini untuk saran pendamping spesifik")
+                        st.markdown(f"""<div class="rec-card"><div class="rec-rank">{i}</div><div><div class="rec-name">{rec["food"]}</div><div class="rec-reason">{rec.get("reason","")}<br><span style="font-size:.64rem;color:#8A95A8;">{rec_category} • kelompok umur {rec_age}</span></div></div><div class="rec-score">{rec["score"]:.0f}/100</div></div>""", unsafe_allow_html=True)
                 else:
                     st.info(result.get("recommendation_note") or "Belum ada rekomendasi yang memenuhi kriteria.")
             priority_html = "".join(f'<span class="priority">✦ {x}</span>' for x in nutrient_priorities(adequacy))
-            # Isi insight = kalimat versi orang tua (pendamping). Narasi panjang lama dihapus.
-            if pairing_summary:
-                insight_body = html.escape(str(pairing_summary))
-            else:
-                _prio_join = ", ".join(nutrient_priorities(adequacy)) or "gizi seimbang"
-                insight_body = (
-                    f"{html.escape(top_food_display)} sebaiknya dilengkapi makanan atau minuman "
-                    f"pendamping untuk menutup kekurangan {html.escape(_prio_join)}, dengan porsi "
-                    f"wajar sesuai usia anak. Aktifkan mode AI (Gemini) untuk saran pendamping yang lebih spesifik."
-                )
-            st.markdown(f"""<div class="insight"><b>⭐ Insight & Rekomendasi untuk Anak</b><br><br>{insight_body}<br><br>{priority_html}</div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="insight"><b>⭐ Insight & Rekomendasi untuk Anak</b><br><br>{build_narrative_id(result)}<br>{priority_html}</div>""", unsafe_allow_html=True)
 
         with tab2:
             food_nutrients = result.get("food_nutrition", {}).get("nutrients", {})
@@ -5842,6 +5729,36 @@ if page == "Dashboard":
                 if missing_analysis:
                     missing_names = [DISPLAY_NAMES.get(key, key) for key in missing_analysis]
                     st.info("Nutrien berikut sudah ditemukan pada profil makanan tetapi belum mempunyai analisis kontribusi AKG: " + ", ".join(missing_names) + ".")
+
+        with tab3:
+            if recommendations:
+                prio_html = "".join(f'<span class="tag-chip">✦ {x}</span>' for x in nutrient_priorities(adequacy))
+                method_name = recommendation_meta.get("method", "Age-First Food Suitability + Nutrient Gap Ranking")
+                engine_version = recommendation_meta.get("engine_version", "3.0")
+                rec_age_group = recommendation_meta.get("age_group", age_text(int(st.session_state.child_profile.get("age_months", 0))))
+                st.markdown(f"""<div class="rec-hero"><div class="rec-hero-title">Rekomendasi Makanan Prioritas <span style="font-size:.72rem;color:#7A8699;">• Engine v{engine_version}</span></div><div class="rec-hero-text">Metode <b>{method_name}</b> menggunakan dua tahap. Pertama, sistem melakukan <b>filter keras kesesuaian makanan untuk kelompok umur {rec_age_group}</b>. Kandidat yang berupa bahan ambigu, minuman, camilan, produk olahan, atau tidak sesuai tahap makan tidak masuk ranking. Kedua, hanya kandidat yang lolos filter tersebut yang diperingkat berdasarkan gap nutrisi, cakupan nutrien, dan kualitas kelompok makanan. Fokus nutrisi saat ini: {", ".join(nutrient_priorities(adequacy)) or "kontribusi nutrisi umum"}.</div><div class="tag-row">{prio_html}</div></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class="rec-visual-head"><div><div class="rec-visual-title">Ranking Kandidat Makanan</div><div class="rec-visual-sub">Semua kandidat di bawah sudah lolos filter makanan sesuai kelompok umur. Urutan kemudian ditentukan dari kecocokan gap nutrisi dan kualitas kelompok makanan. Cakupan menunjukkan jumlah nutrien prioritas yang didukung setiap kandidat.</div></div><div class="rec-legend"><span>★ Ranking</span><span>Score 0–100</span><span>Cakupan nutrisi</span></div></div>""", unsafe_allow_html=True)
+                ranking_rows = []
+                for rank, rec in enumerate(recommendations[:5], 1):
+                    score = float(rec.get("score", 0)); coverage = int(rec.get("coverage", 0)); coverage_total = int(rec.get("coverage_total", 0))
+                    reason = str(rec.get("reason", "")); fit_score = float(rec.get("nutrient_fit_score", 0)); quality_score = float(rec.get("quality_score", 0))
+                    top_class = " top" if rank == 1 else ""
+                    ranking_rows.append(f'<div class="ranking-row{top_class}"><div class="rank-number">#{rank}</div><div class="rank-food"><div class="rank-food-name">{rec["food"]}</div><div class="rank-reason">{reason}<br><span style="font-size:.66rem;color:#98A2B3;">✓ Lolos filter umur • Gap nutrisi {fit_score:.0f} • Kualitas kandidat {quality_score:.0f}</span></div></div><div class="ranking-score"><div class="rank-score-label"><span>Skor</span><b>{score:.0f}/100</b></div><div class="rank-progress"><span style="width:{max(0,min(score,100)):.1f}%"></span></div></div><div class="rank-coverage">{coverage}/{coverage_total or "-"} nutrien<br>tercakup</div></div>')
+                st.markdown('<div class="ranking-board"><div class="ranking-head"><div>Peringkat</div><div>Makanan</div><div>Skor</div><div>Cakupan</div></div>' + "".join(ranking_rows) + '</div>', unsafe_allow_html=True)
+                cols = st.columns(min(3, len(recommendations)))
+                for i, rec in enumerate(recommendations[:3]):
+                    with cols[i]:
+                        fit_score = float(rec.get("nutrient_fit_score", 0)); coverage_score = float(rec.get("coverage_score", 0)); quality_score = float(rec.get("quality_score", 0)); category_label = rec.get("category_label", "menu")
+                        st.markdown(f"""<div class="recommend-card-rich"><div class="rec-rank-badge">🥗 #{i+1} &nbsp; Kandidat Utama</div><div class="food">{rec["food"]}</div><div class="score">{rec["score"]:.0f}/100</div><div class="reason">{rec.get("reason", "Direkomendasikan untuk membantu melengkapi gap nutrisi prioritas.")}</div><div style="margin-top:10px;font-size:.67rem;color:#8792A6;line-height:1.6;">{category_label}<br>Gap nutrisi {fit_score:.0f} • Cakupan {coverage_score:.0f}<br>✓ Lolos filter umur • Kualitas kandidat {quality_score:.0f}</div></div>""", unsafe_allow_html=True)
+                if len(recommendations) > 3:
+                    st.markdown("#### Kandidat Lain")
+                    extra_cols = st.columns(2)
+                    for i, rec in enumerate(recommendations[3:5]):
+                        with extra_cols[i % 2]:
+                            st.markdown(f"""<div class="insight-soft"><b>#{i+4} • {rec["food"]}</b><br><span style="color:#0A9F76;font-weight:900;">{rec["score"]:.0f}/100</span><br><span style="color:#8792A6;font-size:.74rem;line-height:1.58;">{rec.get("reason", "")}</span></div>""", unsafe_allow_html=True)
+                st.markdown('<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;"><b>Cara membaca rekomendasi:</b> tahap pertama adalah <b>hard age-food gate</b>; kandidat yang tidak sesuai kelompok umur atau berupa bahan/minuman/camilan/produk ambigu langsung dikeluarkan. Setelah lolos, skor ranking dihitung dari 70% kecocokan gap nutrisi + 15% cakupan nutrien + 15% kualitas kelompok makanan. Bobot tersebut adalah aturan desain ranking internal, bukan bobot klinis. Gap berasal dari makanan yang dianalisis terhadap acuan kelompok umur dan bukan diagnosis kekurangan nutrisi anak.</div>', unsafe_allow_html=True)
+            else:
+                st.info(result.get("recommendation_note") or "Mesin rekomendasi belum menghasilkan kandidat yang memenuhi kriteria.")
 
         with tab4:
             try:
@@ -5888,7 +5805,7 @@ if page == "Dashboard":
             with st.spinner("Menyusun menu harian..."):
                 ai_plan = generate_ai_meal_plan(st.session_state.child_profile, str(status["prediction"]), plan_priorities, top_food_display, recommendations, meal_time)
             if ai_plan and ai_plan.get("meals"):
-                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "Disusun oleh Tim ..."
+                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "✨ Disusun oleh AI (Gemini)"
             else:
                 meals = build_meal_plan(top_food_display, recommendations, plan_priorities, meal_time)
                 closing = "Menu disusun otomatis dari recommendation engine. Aktifkan mode AI (Gemini) untuk hasil lebih personal."
@@ -5900,18 +5817,6 @@ if page == "Dashboard":
                 is_locked = str(m.get("waktu", "")).strip().lower() == meal_time.strip().lower()
                 badge = "📷" if is_locked else "🍽️"
                 st.markdown(f'<div class="rec-card"><div class="rec-rank">{badge}</div><div><div class="rec-name">{waktu} — {menu}</div><div class="rec-reason">{alasan}</div></div></div>', unsafe_allow_html=True)
-
-            # Ringkasan gizi sehari (kualitatif, tanpa angka karangan) + fokus nutrien.
-            nutri_summary = str(ai_plan.get("ringkasan_gizi", "")) if (ai_plan and isinstance(ai_plan, dict)) else ""
-            prio_chip_html = "".join(f'<span class="priority">\u2726 {html.escape(x)}</span>' for x in plan_priorities)
-            summary_text = html.escape(nutri_summary) if nutri_summary else "Rangkaian menu di atas disusun untuk saling melengkapi kebutuhan gizi anak sepanjang hari."
-            st.markdown(
-                f'<div class="insight" style="margin-top:12px;"><b>\U0001F34E Ringkasan Gizi Sehari</b><br><br>'
-                f'{summary_text}'
-                f'<br><br><span style="font-size:.72rem;color:#8A95A8;">Nutrien yang difokuskan hari ini:</span><br>{prio_chip_html}</div>',
-                unsafe_allow_html=True,
-            )
-
             if closing:
                 st.markdown(f'<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;margin-top:10px;">{html.escape(closing)}</div>', unsafe_allow_html=True)
             st.markdown('<div class="action-note" style="margin-top:12px;"><span class="note-icon">◇</span><span>Rencana ini edukatif. Untuk anak dengan indikasi gangguan gizi, konsultasikan menu dengan dokter anak atau ahli gizi.</span></div>', unsafe_allow_html=True)

@@ -1,7 +1,10 @@
 from pathlib import Path
 import base64
 import io
+import html
 import json
+import os
+import time
 from datetime import datetime
 
 import numpy as np
@@ -1520,7 +1523,7 @@ div[data-testid="stPlotlyChart"] { background:#FFF; border:1px solid #E7EAF0; bo
 }
 .ranking-head {
     display:grid;
-    grid-template-columns:52px 1.7fr .9fr .8fr;
+    grid-template-columns:78px 1.7fr .9fr .8fr;
     gap:12px;
     padding:0 12px 9px;
     color:#929CAF;
@@ -1529,9 +1532,18 @@ div[data-testid="stPlotlyChart"] { background:#FFF; border:1px solid #E7EAF0; bo
     text-transform:uppercase;
     letter-spacing:.045em;
 }
+.ranking-head > div {
+    white-space:nowrap;
+    word-break:normal;
+    overflow-wrap:normal;
+    min-width:0;
+}
+.ranking-head > div:first-child {
+    text-align:center;
+}
 .ranking-row {
     display:grid;
-    grid-template-columns:52px 1.7fr .9fr .8fr;
+    grid-template-columns:78px 1.7fr .9fr .8fr;
     gap:12px;
     align-items:center;
     padding:12px;
@@ -4473,6 +4485,369 @@ def food_display_name(value):
 # CHARTS
 # ============================================================
 
+
+def build_narrative_id(result):
+    """
+    Narasi hasil dalam Bahasa Indonesia dengan nama makanan tampilan
+    yang konsisten dengan dashboard.
+    """
+    profile = result.get("child_profile", {})
+    status = result.get("nutrition_status", {})
+    preds = result.get("food_prediction", [])
+    adequacy = result.get("nutrient_contribution", {})
+    recs = result.get("recommendations", [])
+    meta = result.get("recommendation_meta", {})
+
+    age_months = int(profile.get("age_months", 0))
+    age_label = age_text(age_months)
+
+    status_name = html.escape(
+        str(status.get("prediction", "-")).title()
+    )
+
+    parts = [
+        (
+            f"Untuk anak usia {html.escape(age_label)} dengan berat "
+            f"{float(profile.get('weight_kg', 0)):g} kg, tinggi "
+            f"{float(profile.get('height_cm', 0)):g} cm, dan MUAC/LILA "
+            f"{float(profile.get('muac_cm', 0)):g} cm, model antropometri "
+            f"memberikan hasil skrining <b>{status_name}</b>"
+            + (
+                f" dengan keyakinan {float(status['confidence']) * 100:.1f}%."
+                if status.get("confidence") is not None
+                else "."
+            )
+        )
+    ]
+
+    if preds:
+        top = preds[0]
+        display_food = html.escape(
+            food_display_name(top.get("food"))
+        )
+        parts.append(
+            f"Foto makanan paling mungkin dikenali sebagai "
+            f"<b>{display_food}</b> dengan probabilitas "
+            f"{float(top.get('confidence', 0)) * 100:.1f}%."
+        )
+
+    if adequacy:
+        ranked = sorted(
+            adequacy.items(),
+            key=lambda item: float(
+                item[1].get("contribution_percent", 0)
+            ),
+        )
+        low = ranked[:3]
+
+        low_text = ", ".join(
+            (
+                f"{html.escape(DISPLAY_NAMES.get(key, key))} "
+                f"({float(info.get('contribution_percent', 0)):.1f}%)"
+            )
+            for key, info in low
+        )
+
+        parts.append(
+            "Berdasarkan <b>nilai nutrisi referensi makanan</b>, kontribusi "
+            f"terhadap AKG yang paling rendah terlihat pada <b>{low_text}</b>. "
+            "Nilai ini menunjukkan kontribusi makanan yang dianalisis terhadap "
+            "acuan kelompok umur, bukan komposisi relatif makanan dan bukan bukti "
+            "bahwa anak mengalami kekurangan nutrisi."
+        )
+
+    if recs:
+        names = ", ".join(
+            html.escape(str(rec.get("food", "-")))
+            for rec in recs[:3]
+        )
+        group = html.escape(
+            str(meta.get("age_group", "-"))
+        )
+        parts.append(
+            f"Sebagai kandidat pelengkap, sistem menempatkan <b>{names}</b> "
+            f"pada peringkat teratas menggunakan pemeringkatan berbasis gap "
+            f"nutrisi dan kesesuaian kelompok umur {group}."
+        )
+
+    parts.append(
+        "Hasil ini digunakan untuk skrining dan edukasi. Satu foto makanan "
+        "tidak mewakili seluruh asupan harian dan tidak menggantikan "
+        "pemeriksaan tenaga kesehatan."
+    )
+
+    return "<br><br>".join(parts)
+
+def build_meal_plan(detected_food_display, recommendations, priorities, meal_time="Makan Siang"):
+    """Rencana menu harian sederhana (offline, tanpa API)."""
+    slots = ["Sarapan", "Makan Siang", "Camilan Sore", "Makan Malam"]
+    pool = [str(r.get("food", "-")) for r in (recommendations or []) if r.get("food")]
+    reasons = {
+        str(r.get("food", "")): str(r.get("reason", ""))
+        for r in (recommendations or [])
+    }
+
+    plan = []
+    idx = 0
+    for slot in slots:
+        if slot == "Makan Siang" and detected_food_display and detected_food_display != "-":
+            food = detected_food_display
+            reason = "Menu yang baru saja dianalisis."
+        elif idx < len(pool):
+            food = pool[idx]
+            reason = reasons.get(food, "Membantu melengkapi gap nutrisi prioritas.")
+            idx += 1
+        else:
+            food = "Menu bergizi seimbang"
+            reason = "Lengkapi dengan sumber protein, sayur, dan buah."
+        plan.append({"waktu": slot, "menu": food, "alasan": reason})
+    return plan
+
+
+def generate_ai_pairings(profile, status_label, priorities, detected_food, recommendations):
+    """
+    Rekomendasi makanan/minuman PENDAMPING yang cocok dipadukan dengan `detected_food`
+    untuk melengkapi nutrisi. Return list [{"nama","jenis","alasan"}] atau None (fallback offline).
+    """
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        api_key = None
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from google import genai
+    except Exception:
+        return None
+
+    age_months = int(profile.get("age_months", 0))
+    prio_text = ", ".join(priorities) if priorities else "gizi seimbang"
+    rec_text = ", ".join(str(r.get("food", "")) for r in (recommendations or [])[:6]) or "-"
+
+    if age_months < 24:
+        age_rule = ("anak di bawah 2 tahun: tekstur lunak, tanpa/rendah garam & gula, tanpa madu, "
+                    "hindari gorengan dan makanan mudah tersedak.")
+    else:
+        age_rule = "anak balita: porsi anak, batasi garam/gula/gorengan berlebihan."
+
+    prompt = f"""Kamu ahli gizi anak. Anak (usia {age_months} bulan) sedang makan "{detected_food}".
+Sarankan 3 makanan/minuman PENDAMPING yang cocok DISANDINGKAN dengan "{detected_food}" untuk
+melengkapi nutrisi yang masih kurang: {prio_text}.
+
+Aturan:
+- Fokus pada pendamping/pelengkap yang WAJAR dimakan BERSAMA "{detected_food}" (mis. lauk, sayur, buah, atau minuman).
+- JANGAN menyarankan "{detected_food}" itu sendiri. Saran harus benar-benar melengkapi, bukan mengulang.
+- Sesuai usia: {age_rule}
+- Setiap saran: nama, jenis ("makanan" atau "minuman"), dan alasan singkat (nutrisi apa yang dilengkapi).
+- Boleh terinspirasi kandidat sistem: {rec_text}, tetapi utamakan yang benar-benar cocok dipadukan dengan "{detected_food}".
+
+Jawab HANYA JSON valid:
+{{"pairings":[{{"nama":"...","jenis":"makanan","alasan":"..."}}]}}"""
+
+    for model_name in ("gemini-flash-latest", "gemini-flash-lite-latest"):
+        for attempt in range(2):
+            try:
+                client = genai.Client(api_key=api_key)
+                resp = client.models.generate_content(model=model_name, contents=prompt)
+                text = (resp.text or "").strip().replace("```json", "").replace("```", "").strip()
+                data = json.loads(text)
+                pairings = data.get("pairings", [])
+                if pairings:
+                    return pairings
+            except Exception as e:
+                msg = repr(e)
+                if any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break
+    return None
+
+
+def generate_ai_meal_plan(profile, status_label, priorities, detected_food, recommendations, meal_time):
+    """
+    Rencana menu harian via Gemini (opsional).
+    Makanan yang difoto DIKUNCI pada slot `meal_time`; AI menyusun sisa hari
+    agar total asupan sehari saling melengkapi & sesuai usia anak.
+    Return dict {"meals":[...], "catatan":...} atau None bila gagal -> fallback offline.
+    """
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        api_key = None
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception:
+        return None
+
+    age_months = int(profile.get("age_months", 0))
+    prio_text = ", ".join(priorities) if priorities else "gizi seimbang"
+    rec_text = ", ".join(
+        str(r.get("food", "")) for r in (recommendations or [])[:5]
+    ) or "-"
+
+    all_slots = ["Sarapan", "Makan Siang", "Camilan Sore", "Makan Malam"]
+    idx_now = all_slots.index(meal_time) if meal_time in all_slots else 0
+
+    # Slot berikutnya dalam hari yang sama.
+    after_slots = all_slots[idx_now + 1:]
+
+    if after_slots:
+        # Masih ada waktu makan tersisa hari ini + tetap sarankan menu besok pagi.
+        plan_slots = after_slots + ["Sarapan (besok)"]
+        horizon_text = (
+            f'Lengkapi sisa hari ini ({", ".join(after_slots)}) '
+            f'lalu tambahkan "Sarapan (besok)" agar transisi ke hari berikutnya tetap bergizi.'
+        )
+    else:
+        # meal_time = Makan Malam -> tidak ada sisa hari ini, rekomendasi untuk BESOK.
+        plan_slots = ["Sarapan (besok)", "Makan Siang (besok)", "Camilan Sore (besok)", "Makan Malam (besok)"]
+        horizon_text = (
+            "Anak sudah menyelesaikan makan malam hari ini. Susun menu untuk BESOK "
+            "(sarapan sampai makan malam) yang melengkapi nutrien prioritas."
+        )
+
+    other_text = ", ".join(plan_slots)
+
+    if age_months < 6:
+        stage = (
+            "Bayi di bawah 6 bulan: HANYA ASI/susu formula. JANGAN memberi makanan padat "
+            "apa pun. Untuk tiap waktu makan, tulis pemberian ASI/susu, bukan menu makanan."
+        )
+    elif age_months < 9:
+        stage = (
+            "Bayi 6-8 bulan (MPASI awal): makanan lumat/puree sangat halus (bubur saring, "
+            "puree buah/sayur, hati ayam lumat). TANPA garam, gula, madu, gorengan, makanan "
+            "keras, kacang utuh, atau bumbu tajam."
+        )
+    elif age_months < 12:
+        stage = (
+            "Bayi 9-11 bulan (MPASI lanjutan): makanan lembik dicincang halus / finger food "
+            "lunak (nasi tim lembek, sayur kukus lunak, ikan/ayam cincang tanpa duri). TANPA "
+            "garam berlebih, gula, madu, gorengan keras, atau makanan mudah tersedak."
+        )
+    elif age_months < 24:
+        stage = (
+            "Anak 12-23 bulan: makanan keluarga bertekstur lunak, potongan kecil, porsi kecil, "
+            "rendah garam & gula. Hindari gorengan berminyak, makanan pedas, dan makanan keras "
+            "berisiko tersedak."
+        )
+    else:
+        stage = (
+            "Anak di atas 2 tahun: makanan keluarga bergizi seimbang porsi anak, tetap batasi "
+            "garam, gula, dan gorengan berlebihan."
+        )
+
+    prompt = f"""Kamu ahli gizi anak. Susun rencana menu harian (Bahasa Indonesia) yang AMAN
+dan SESUAI USIA.
+
+Data anak:
+- Usia: {age_months} bulan
+- Aturan tahap makan yang WAJIB dipatuhi: {stage}
+- Status skrining gizi: {status_label}
+- Nutrien prioritas yang masih kurang (harus dilengkapi sepanjang hari): {prio_text}
+
+Konteks waktu makan (SANGAT PENTING):
+- Anak SUDAH makan "{detected_food}" pada waktu "{meal_time}". Slot "{meal_time}" TIDAK BOLEH
+  diubah - isi persis dengan "{detected_food}".
+- {horizon_text}
+- Tugasmu menyusun: {other_text}. Susun agar TOTAL asupan saling melengkapi dan memenuhi
+  nutrien prioritas (protein, vitamin, energi, dll), tanpa menumpuk nutrien yang sudah cukup.
+- Kandidat makanan pendamping dari sistem (boleh dipakai bila cocok usia): {rec_text}
+
+Aturan:
+- Menu WAJIB mengikuti aturan tahap makan sesuai usia. Ini prioritas nomor satu.
+- Untuk menu "(besok)": susun sebagai rencana makan sehari yang SEHAT, LENGKAP, dan BERVARIASI —
+  bukan sekadar menambal gap. Tiap waktu makan sebaiknya punya sumber karbohidrat, protein
+  (hewani/nabati bergantian), sayur, dan sesekali buah, sehingga terasa seperti menu harian
+  yang menarik dan bergizi seimbang untuk anak.
+- LARANGAN KERAS: menu untuk SEMUA waktu makan selain "{meal_time}" HARUS BERBEDA dari "{detected_food}".
+  JANGAN pernah menuliskan "{detected_food}" (atau variasi namanya) di slot lain, termasuk di
+  "Makan Malam (besok)". Setiap waktu makan harus memakai menu dan bahan utama yang berbeda-beda.
+- Utamakan cara masak yang sehat (kukus, rebus, tim, tumis ringan) dan bahan segar; batasi
+  gorengan berminyak, makanan tinggi gula/garam.
+- Setiap waktu makan: nama menu ringkas + alasan singkat (kaitkan nutrien yang dilengkapi & usia).
+- Gunakan bahan umum dan terjangkau di Indonesia.
+
+Keluarkan waktu makan berikut secara berurutan: "{meal_time}" (isi "{detected_food}"),
+lalu {other_text}. Gunakan label "waktu" persis seperti nama-nama itu (termasuk "(besok)" bila ada).
+
+Jawab HANYA JSON valid:
+{{"meals":[{{"waktu":"Sarapan","menu":"...","alasan":"..."}}],"catatan":"satu kalimat"}}"""
+
+    try:
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        print("=== GEMINI GAGAL (client) ===")
+        print(repr(e))
+        return None
+
+    models_to_try = ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    last_error = None
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                text = (resp.text or "").strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+                data = json.loads(text)
+                meals = data.get("meals", [])
+
+                # Kunci HANYA slot pertama (slot foto hari ini); slot lain milik AI.
+                if meals:
+                    first_w = str(meals[0].get("waktu", "")).lower()
+                    if "besok" not in first_w:
+                        meals[0]["menu"] = detected_food
+
+                # Safety net: cegah slot lain mengulang makanan yang sama dengan foto.
+                df_low = detected_food.strip().lower()
+                alt_pool = [str(r.get("food", "")) for r in (recommendations or []) if r.get("food")]
+                alt_used = set()
+                for i, mm in enumerate(meals):
+                    if i == 0:
+                        continue
+                    menu_low = str(mm.get("menu", "")).strip().lower()
+                    if not menu_low or not df_low:
+                        continue
+                    if menu_low == df_low or df_low in menu_low or menu_low in df_low:
+                        replacement = None
+                        for cand in alt_pool:
+                            cl = cand.strip().lower()
+                            if cl and cl != df_low and cl not in alt_used:
+                                replacement = cand
+                                break
+                        mm["menu"] = replacement or "Menu bergizi seimbang (variasi lain)"
+                        mm["alasan"] = "Divariasikan agar tidak mengulang menu yang sama dengan hari ini."
+                        alt_used.add(mm["menu"].strip().lower())
+                return data
+            except Exception as e:
+                last_error = e
+                msg = repr(e)
+                if any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break
+
+    print("=== GEMINI GAGAL (semua percobaan) ===")
+    print(repr(last_error))
+    print("====================")
+    return None
+
 def top3_chart(predictions):
     df = pd.DataFrame(predictions).copy()
 
@@ -4533,92 +4908,92 @@ def top3_chart(predictions):
 
     return fig
 
-def nutrient_radar(adequacy):
+def nutrient_radar(result):
     """
-    Radar diperbaiki agar label tidak nabrak.
-    - legend dipindah ke bawah
-    - domain radar diperkecil
-    - margin diperbesar
-    - label dibuat konsisten dan ringkas
+    Radar KANDUNGAN NUTRISI (bukan %AKG).
+    Nilai dinormalisasi 0-100 relatif terhadap nutrien tertinggi agar bentuk
+    radar tetap terbaca dan garis kuning tegas. Hover tetap menampilkan angka
+    dan satuan asli supaya tidak menyesatkan.
     """
+    nutrition = result.get("food_nutrition", {})
+    nutrients = nutrition.get("nutrients", {}) if nutrition.get("status") == "ok" else {}
 
-    if not adequacy:
+    if not nutrients:
         return go.Figure()
 
     pretty = {
         "calories": "Energi",
         "protein": "Protein",
         "carbohydrate": "Karbohidrat",
+        "fat": "Lemak",
         "iron": "Zat Besi",
         "calcium": "Kalsium",
         "vitamin_a": "Vit A",
         "vitamin_c": "Vit C",
-        "fat": "Lemak",
     }
 
-    rows = []
+    labels = []
+    raw_values = []
+    units = []
 
-    for key, info in adequacy.items():
-        rows.append(
-            (
-                pretty.get(key, DISPLAY_NAMES.get(key, key)),
-                min(max(float(info.get("contribution_percent", 0)), 0), 100),
-            )
-        )
+    for key, value in nutrients.items():
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            continue
+        labels.append(pretty.get(key, DISPLAY_NAMES.get(key, key)))
+        raw_values.append(amount)
+        units.append(NUTRIENT_UNITS.get(key, ""))
 
-    labels = [x[0] for x in rows]
-    values = [x[1] for x in rows]
+    if not labels:
+        return go.Figure()
 
-    if labels:
-        labels = labels + [labels[0]]
-        values = values + [values[0]]
+    max_val = max(raw_values) or 1.0
+    norm_values = [v / max_val * 100 for v in raw_values]
+
+    # Tutup poligon (sambungkan titik terakhir ke titik pertama).
+    labels_c = labels + [labels[0]]
+    norm_c = norm_values + [norm_values[0]]
+    raw_c = raw_values + [raw_values[0]]
+    units_c = units + [units[0]]
+
+    customdata = [[r, u] for r, u in zip(raw_c, units_c)]
 
     fig = go.Figure()
 
     fig.add_trace(
         go.Scatterpolar(
-            r=values,
-            theta=labels,
+            r=norm_c,
+            theta=labels_c,
             fill="toself",
-            name="Makanan",
-            line=dict(color="#FFC21A", width=2.7),
-            fillcolor="rgba(255,194,26,.18)",
-            hovertemplate="<b>%{theta}</b><br>%{r:.1f}%<extra></extra>",
-        )
-    )
-
-    fig.add_trace(
-        go.Scatterpolar(
-            r=[50] * len(values),
-            theta=labels,
-            name="Referensi 50%",
-            line=dict(
-                color="#8A8A86",
-                width=1.15,
-                dash="dash",
-            ),
-            hoverinfo="skip",
+            name="Kandungan nutrisi",
+            line=dict(color="#F5B800", width=3.4),
+            fillcolor="rgba(255,201,40,.28)",
+            marker=dict(size=6, color="#F5B800"),
+            customdata=customdata,
+            hovertemplate="<b>%{theta}</b><br>%{customdata[0]:.1f} %{customdata[1]}<extra></extra>",
         )
     )
 
     fig.update_layout(
         title=dict(
-            text="Profil Nutrisi Makanan",
+            text="Kandungan Nutrisi Makanan",
             x=.03,
             font=dict(size=15, color="#272727"),
         ),
         height=355,
-        margin=dict(l=65, r=65, t=62, b=62),
+        margin=dict(l=65, r=65, t=62, b=52),
         polar=dict(
-            domain=dict(x=[.14, .86], y=[.16, .90]),
+            domain=dict(x=[.14, .86], y=[.14, .90]),
             bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(
-                range=[0,100],
-                tickvals=[25,50,75,100],
-                tickfont=dict(size=8, color="#948C81"),
+                range=[0, 100],
+                tickvals=[25, 50, 75, 100],
+                tickfont=dict(size=8, color="#B4ADA1"),
                 gridcolor="#EAE4D5",
                 linecolor="#EAE4D5",
                 angle=90,
+                showticklabels=False,
             ),
             angularaxis=dict(
                 tickfont=dict(size=10, color="#6B655D"),
@@ -4626,19 +5001,11 @@ def nutrient_radar(adequacy):
                 linecolor="#EEE7D8",
             ),
         ),
-        legend=dict(
-            orientation="h",
-            x=.5,
-            xanchor="center",
-            y=-.12,
-            yanchor="top",
-            font=dict(size=9),
-        ),
+        showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
     )
 
     return fig
-
 
 def history_status_chart(history):
     if not history:
@@ -5194,52 +5561,27 @@ if page == "Dashboard":
 
     profile = st.session_state.child_profile
 
-
     st.markdown(
         """<div style="margin-bottom:13px"><div class="section-kicker">Smart Screening Workflow</div><div class="section-title">Mulai Analisis NutriVision</div><div class="section-sub">Lengkapi data anak, unggah foto makanan, kemudian jalankan analisis AI.</div></div><div class="workflow-strip"><div class="workflow-item"><div class="workflow-number">01</div><div><div class="workflow-title">Data Antropometri</div><div class="workflow-sub">Umur, BB, TB, dan MUAC/LILA</div></div></div><div class="workflow-arrow">→</div><div class="workflow-item"><div class="workflow-number">02</div><div><div class="workflow-title">Foto Makanan</div><div class="workflow-sub">Satu menu utama dengan objek jelas</div></div></div><div class="workflow-arrow">→</div><div class="workflow-item"><div class="workflow-number">03</div><div><div class="workflow-title">Analisis AI</div><div class="workflow-sub">Screening, nutrisi, dan rekomendasi</div></div></div></div>""",
         unsafe_allow_html=True,
     )
 
-    input_col, image_col, action_col = st.columns(
-        [1.12, .95, .96],
-        gap="small",
-    )
+    input_col, image_col, action_col = st.columns([1.12, .95, .96], gap="small")
 
     with input_col:
         with st.container(key="child_card"):
-            st.markdown(
-                '<div class="panel-title">♙ &nbsp;Data Anak</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="panel-sub">Input langsung pada dashboard agar alur analisis lebih ringkas.</div>',
-                unsafe_allow_html=True,
-            )
-
+            st.markdown('<div class="panel-title">♙ &nbsp;Data Anak</div>', unsafe_allow_html=True)
+            st.markdown('<div class="panel-sub">Input langsung pada dashboard agar alur analisis lebih ringkas.</div>', unsafe_allow_html=True)
             r1c1, r1c2 = st.columns(2)
             with r1c1:
-                age_months = st.number_input(
-                    "Umur (bulan)", min_value=6, max_value=83,
-                    value=int(profile["age_months"]), step=1,
-                )
+                age_months = st.number_input("Umur (bulan)", min_value=6, max_value=83, value=int(profile["age_months"]), step=1)
             with r1c2:
-                weight_kg = st.number_input(
-                    "Berat badan (kg)", min_value=3.0, max_value=40.0,
-                    value=float(profile["weight_kg"]), step=.1,
-                )
-
+                weight_kg = st.number_input("Berat badan (kg)", min_value=3.0, max_value=40.0, value=float(profile["weight_kg"]), step=.1)
             r2c1, r2c2 = st.columns(2)
             with r2c1:
-                height_cm = st.number_input(
-                    "Tinggi badan (cm)", min_value=45.0, max_value=140.0,
-                    value=float(profile["height_cm"]), step=.5,
-                )
+                height_cm = st.number_input("Tinggi badan (cm)", min_value=45.0, max_value=140.0, value=float(profile["height_cm"]), step=.5)
             with r2c2:
-                muac_cm = st.number_input(
-                    "MUAC / LILA (cm)", min_value=5.0, max_value=30.0,
-                    value=float(profile["muac_cm"]), step=.1,
-                )
-
+                muac_cm = st.number_input("MUAC / LILA (cm)", min_value=5.0, max_value=30.0, value=float(profile["muac_cm"]), step=.1)
             bmi_preview = weight_kg / ((height_cm / 100) ** 2)
             p1, p2, p3 = st.columns(3)
             p1.metric("Usia", age_text(age_months))
@@ -5248,746 +5590,324 @@ if page == "Dashboard":
 
     with image_col:
         with st.container(key="photo_card"):
-            st.markdown(
-                '<div class="panel-title">▣ &nbsp;Foto Makanan</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<div class="panel-sub">Gunakan foto dengan satu menu utama yang jelas.</div>',
-                unsafe_allow_html=True,
-            )
-
+            st.markdown('<div class="panel-title">▣ &nbsp;Foto Makanan</div>', unsafe_allow_html=True)
+            st.markdown('<div class="panel-sub">Gunakan foto dengan satu menu utama yang jelas.</div>', unsafe_allow_html=True)
             image = None
-
-            # Sebelum ada foto: tampilkan uploader kuning.
-            # Sesudah foto dipilih: uploader disembunyikan dan diganti preview.
             if st.session_state.food_image_bytes is None:
-                uploaded = st.file_uploader(
-                    "Upload foto",
-                    type=["jpg", "jpeg", "png", "webp"],
-                    label_visibility="collapsed",
-                    key="food_upload_widget",
-                )
-
-                if uploaded is not None:
-                    st.session_state.food_image_bytes = uploaded.getvalue()
-                    st.session_state.food_image_name = uploaded.name
-                    st.rerun()
-
+                source = st.radio("Sumber gambar", ["📁 Upload", "📷 Kamera"], horizontal=True, label_visibility="collapsed", key="food_source_mode")
+                if source == "📁 Upload":
+                    uploaded = st.file_uploader("Upload foto", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed", key="food_upload_widget")
+                    if uploaded is not None:
+                        st.session_state.food_image_bytes = uploaded.getvalue()
+                        st.session_state.food_image_name = uploaded.name
+                        st.rerun()
+                else:
+                    shot = st.camera_input("Ambil foto makanan", label_visibility="collapsed", key="food_camera_widget")
+                    if shot is not None:
+                        st.session_state.food_image_bytes = shot.getvalue()
+                        st.session_state.food_image_name = "kamera.jpg"
+                        st.rerun()
             else:
                 try:
-                    image = Image.open(
-                        io.BytesIO(st.session_state.food_image_bytes)
-                    ).convert("RGB")
+                    image = Image.open(io.BytesIO(st.session_state.food_image_bytes)).convert("RGB")
                     preview = fixed_preview(image)
-
-                    st.image(
-                        preview,
-                        use_container_width=True,
-                        caption="Preview makanan",
-                    )
-
-                    if st.button(
-                        "↻  Ganti foto makanan",
-                        key="change_food_photo",
-                        use_container_width=True,
-                    ):
+                    st.image(preview, use_container_width=True, caption="Preview makanan")
+                    if st.button("↻  Ganti foto makanan", key="change_food_photo", use_container_width=True):
                         st.session_state.food_image_bytes = None
                         st.session_state.food_image_name = None
                         st.session_state.pop("food_upload_widget", None)
+                        st.session_state.pop("food_camera_widget", None)
                         st.rerun()
-
                 except Exception:
                     st.session_state.food_image_bytes = None
                     st.session_state.food_image_name = None
                     st.session_state.pop("food_upload_widget", None)
+                    st.session_state.pop("food_camera_widget", None)
                     st.rerun()
-
-            st.markdown(
-                '<div class="photo-tip"><span class="photo-tip-icon">ⓘ</span><span>Pastikan foto diambil dari atas (top-down) dengan pencahayaan yang baik.</span></div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="photo-tip"><span class="photo-tip-icon">ⓘ</span><span>Pastikan foto diambil dari atas (top-down) dengan pencahayaan yang baik.</span></div>', unsafe_allow_html=True)
 
     with action_col:
         with st.container(key="action_card"):
-            st.markdown(
-                """<div class="cta-box"><div class="cta-badge">AI ANALYSIS</div><div class="cta-title">Analisis dalam Satu Alur</div><div class="cta-sub">ConvNeXt V2 Tiny dan NoisyViT B/16 digabung dengan weighted soft voting, lalu diteruskan ke nutrition knowledge base dan recommendation engine.</div></div>""",
-                unsafe_allow_html=True,
-            )
+            st.markdown("""<div class="cta-box"><div class="cta-badge">AI ANALYSIS</div><div class="cta-title">Analisis dalam Satu Alur</div><div class="cta-sub">ConvNeXt V2 Tiny dan NoisyViT B/16 digabung dengan weighted soft voting, lalu diteruskan ke nutrition knowledge base dan recommendation engine.</div></div>""", unsafe_allow_html=True)
+            analyze = st.button("🚀  Jalankan Analisis", type="primary", use_container_width=True, disabled=image is None)
+            st.markdown('<div class="action-note"><span class="note-icon">◇</span><span>Hasil analisis bersifat informatif dan bukan pengganti konsultasi profesional kesehatan.</span></div>', unsafe_allow_html=True)
 
-            analyze = st.button(
-                "🚀  Jalankan Analisis",
-                type="primary",
-                use_container_width=True,
-                disabled=image is None,
-            )
-
-            st.markdown(
-                '<div class="action-note"><span class="note-icon">◇</span><span>Hasil analisis bersifat informatif dan bukan pengganti konsultasi profesional kesehatan.</span></div>',
-                unsafe_allow_html=True,
-            )
-
+    # ============================================================
+    # INFERENCE — hanya jalan saat tombol diklik, simpan ke session_state
+    # ============================================================
     if analyze:
-
-        st.session_state.child_profile.update(
-            {
-                "age_months": int(age_months),
-                "weight_kg": float(weight_kg),
-                "height_cm": float(height_cm),
-                "muac_cm": float(muac_cm),
-            }
-        )
-
+        st.session_state.child_profile.update({
+            "age_months": int(age_months),
+            "weight_kg": float(weight_kg),
+            "height_cm": float(height_cm),
+            "muac_cm": float(muac_cm),
+        })
         try:
             with st.spinner("NutriVision sedang menganalisis..."):
-
                 convnext_model, noisyvit_model, malnutrition_artifact = load_models()
-
                 class_names, nutricheck_df, indonesia_df, requirements_df = load_data()
-
-                nutricheck_kb, nutricheck_food_col, nutricheck_nutrient_cols = (
-                    build_nutrition_kb(nutricheck_df)
-                )
-
-                indo_kb, indo_food_col, indo_nutrient_cols = (
-                    build_nutrition_kb(indonesia_df)
-                )
-
-                indo_rec_df, indo_rec_cols = build_recommendation_table(
-                    indo_kb,
-                    indo_food_col,
-                    indo_nutrient_cols,
-                )
-
+                nutricheck_kb, nutricheck_food_col, nutricheck_nutrient_cols = build_nutrition_kb(nutricheck_df)
+                indo_kb, indo_food_col, indo_nutrient_cols = build_nutrition_kb(indonesia_df)
+                indo_rec_df, indo_rec_cols = build_recommendation_table(indo_kb, indo_food_col, indo_nutrient_cols)
                 result = analyze_child_and_food(
-                    age_months=age_months,
-                    weight_kg=weight_kg,
-                    height_cm=height_cm,
-                    muac_cm=muac_cm,
-                    image=image,
-                    requirements=requirements_df,
-                    convnext_model=convnext_model,
-                    noisyvit_model=noisyvit_model,
-                    class_names=class_names,
-                    ensemble_weights=DEFAULT_ENSEMBLE_WEIGHTS,
+                    age_months=age_months, weight_kg=weight_kg, height_cm=height_cm, muac_cm=muac_cm,
+                    image=image, requirements=requirements_df,
+                    convnext_model=convnext_model, noisyvit_model=noisyvit_model,
+                    class_names=class_names, ensemble_weights=DEFAULT_ENSEMBLE_WEIGHTS,
                     malnutrition_artifact=malnutrition_artifact,
-                    nutricheck_kb=nutricheck_kb,
-                    nutricheck_food_col=nutricheck_food_col,
+                    nutricheck_kb=nutricheck_kb, nutricheck_food_col=nutricheck_food_col,
                     nutricheck_nutrient_cols=nutricheck_nutrient_cols,
-                    indo_rec_df=indo_rec_df,
-                    indo_food_col=indo_food_col,
-                    indo_rec_cols=indo_rec_cols,
+                    indo_rec_df=indo_rec_df, indo_food_col=indo_food_col, indo_rec_cols=indo_rec_cols,
                 )
-                
-
         except Exception as exc:
             st.error("Inference gagal.")
             st.code(str(exc))
             st.stop()
+        st.session_state.last_result = result
+        st.session_state.last_image = image
+        st.session_state.last_convnext = convnext_model
+        st.session_state.last_class_names = class_names
+        st.session_state.last_analysis_id = datetime.now().isoformat()
+        st.session_state.history_saved_id = None
+
+    # ============================================================
+    # RENDER — selalu jalan selama ada hasil terakhir (tahan rerun)
+    # ============================================================
+    if st.session_state.get("last_result") is not None:
+        result = st.session_state.last_result
+        image = st.session_state.get("last_image")
+        convnext_model = st.session_state.get("last_convnext")
+        class_names = st.session_state.get("last_class_names")
 
         status = result["nutrition_status"]
         preds = result["food_prediction"]
         top_food = preds[0]
-        top_food_display = food_display_name(
-        top_food["food"]
-    )
+        top_food_display = food_display_name(top_food["food"])
         certainty = confidence_label(preds)
         bmi = status.get("bmi")
-        adequacy = result.get("nutrient_contribution",{})
-        recommendations = result.get("recommendations",[])
+        adequacy = result.get("nutrient_contribution", {})
+        recommendations = result.get("recommendations", [])
+        recommendation_meta = result.get("recommendation_meta", {})
+
+        pipeline_warning = result.get("warning")
+        if pipeline_warning:
+            st.warning(pipeline_warning)
 
         status_conf_raw = status.get("confidence")
-        status_conf = (
-            float(status_conf_raw) * 100
-            if status_conf_raw is not None
-            else 0.0
-        )
-        food_conf = float(top_food.get("confidence",0))*100
+        status_conf = float(status_conf_raw) * 100 if status_conf_raw is not None else 0.0
+        food_conf = float(top_food.get("confidence", 0)) * 100
         nutrient_score = nutrient_mean(adequacy)
 
-        st.session_state.history.insert(
-            0,
-            {
+        # Catat riwayat HANYA sekali per analisis (bukan tiap rerun).
+        if st.session_state.get("history_saved_id") != st.session_state.get("last_analysis_id"):
+            cp = st.session_state.child_profile
+            st.session_state.history.insert(0, {
                 "waktu": datetime.now().strftime("%d-%m-%Y %H:%M"),
-                "umur_bulan": int(age_months),
-                "berat_kg": float(weight_kg),
-                "tinggi_cm": float(height_cm),
-                "muac_cm": float(muac_cm),
+                "umur_bulan": int(cp.get("age_months", 0)),
+                "berat_kg": float(cp.get("weight_kg", 0)),
+                "tinggi_cm": float(cp.get("height_cm", 0)),
+                "muac_cm": float(cp.get("muac_cm", 0)),
                 "status_gizi": str(status["prediction"]),
                 "makanan": str(top_food["food"]),
-                "confidence": round(food_conf,2),
-            }
-        )
+                "confidence": round(food_conf, 2),
+            })
+            st.session_state.history_saved_id = st.session_state.get("last_analysis_id")
 
-        st.markdown('<div class="panel">',unsafe_allow_html=True)
-        st.markdown(
-            """
-            <div class="section-kicker">AI Analysis Result</div>
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown("""
+            <div class="section-kicker">Hasil Analisis AI</div>
             <div class="section-title">Ringkasan Hasil Analisis</div>
-            <div class="section-sub">
-                Hasil berikut menggabungkan screening antropometri, klasifikasi makanan,
-                dan analisis kontribusi nutrisi.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            <div class="section-sub">Hasil berikut menggabungkan screening antropometri, klasifikasi makanan, dan analisis kontribusi nutrisi.</div>
+            """, unsafe_allow_html=True)
 
-        status_css = "green" if str(status["prediction"]).lower()=="normal" else "yellow"
-
+        status_css = "green" if str(status["prediction"]).lower() == "normal" else "yellow"
         result_cards_html = (
             f'<div class="results-grid">'
-            f'<div class="result-card">'
-            f'<div class="result-icon">🛡️</div>'
-            f'<div class="result-label">Status Gizi</div>'
-            f'<div class="result-value {status_css}">{str(status["prediction"]).upper()}</div>'
-            f'<div class="result-sub">Keyakinan model {status_conf:.1f}%</div>'
-            f'</div>'
-            f'<div class="result-card">'
-            f'<div class="result-icon">🍴</div>'
-            f'<div class="result-label">Makanan Terprediksi</div>'
-            f'<div class="result-value yellow">{top_food_display}</div>'
-            f'<div class="result-sub">Kelas makanan</div>'
-            f'</div>'
-            f'<div class="result-card">'
-            f'<div class="result-icon">🎯</div>'
-            f'<div class="result-label">Keyakinan Prediksi Makanan</div>'
-            f'<div class="ring" style="--v:{food_conf:.1f}"><span>{food_conf:.1f}%</span></div>'
-            f'<div class="result-sub">{certainty}</div>'
-            f'</div>'
-            f'<div class="result-card">'
-            f'<div class="result-icon">⚕</div>'
-            f'<div class="result-label">BMI</div>'
-            f'<div class="result-value">{bmi:.2f}</div>'
-            f'<div class="result-sub">Fitur model • bukan diagnosis</div>'
-            f'</div>'
-            f'<div class="result-card">'
-            f'<div class="result-icon">❤️</div>'
-            f'<div class="result-label">Rata-rata Kontribusi Nutrisi</div>'
-            f'<div class="ring" style="--v:{nutrient_score:.1f}"><span>{nutrient_score:.0f}%</span></div>'
-            f'<div class="result-sub">Ringkasan makanan</div>'
-            f'</div>'
+            f'<div class="result-card"><div class="result-icon">🛡️</div><div class="result-label">Status Gizi</div><div class="result-value {status_css}">{str(status["prediction"]).upper()}</div><div class="result-sub">Keyakinan model {status_conf:.1f}%</div></div>'
+            f'<div class="result-card"><div class="result-icon">🍴</div><div class="result-label">Makanan Terprediksi</div><div class="result-value yellow">{top_food_display}</div><div class="result-sub">Kelas makanan</div></div>'
+            f'<div class="result-card"><div class="result-icon">🎯</div><div class="result-label">Keyakinan Prediksi Makanan</div><div class="ring" style="--v:{food_conf:.1f}"><span>{food_conf:.1f}%</span></div><div class="result-sub">{certainty}</div></div>'
+            f'<div class="result-card"><div class="result-icon">⚕</div><div class="result-label">BMI</div><div class="result-value">{bmi:.2f}</div><div class="result-sub">Fitur model • bukan diagnosis</div></div>'
+            f'<div class="result-card"><div class="result-icon">❤️</div><div class="result-label">Rata-rata Kontribusi Nutrisi</div><div class="ring" style="--v:{nutrient_score:.1f}"><span>{nutrient_score:.0f}%</span></div><div class="result-sub">Ringkasan makanan</div></div>'
             f'</div>'
         )
+        st.markdown(result_cards_html, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown(
-            result_cards_html,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("</div>",unsafe_allow_html=True)
-
-        tab1,tab2,tab3,tab4,tab5 = st.tabs(
-            ["Ringkasan","Nutrisi & Gap","Rekomendasi Makanan","Grad-CAM","Detail Model"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            ["Ringkasan", "Nutrisi & Gap", "Rekomendasi Makanan", "Grad-CAM", "Detail Model", "Menu Harian"]
         )
 
         with tab1:
-            a,b,c = st.columns([1.02,1.08,1.22],gap="large")
-
+            a, b, c = st.columns([1.02, 1.08, 1.22], gap="large")
             with a:
-                st.plotly_chart(
-                    nutrient_radar(adequacy),
-                    use_container_width=True,
-                    config={"displayModeBar":False},
-                )
-
+                st.plotly_chart(nutrient_radar(result), use_container_width=True, config={"displayModeBar": False})
             with b:
-                st.plotly_chart(
-                    top3_chart(preds),
-                    use_container_width=True,
-                    config={"displayModeBar":False},
-                )
-
+                st.plotly_chart(top3_chart(preds), use_container_width=True, config={"displayModeBar": False})
             with c:
                 st.markdown("#### 🔎 Rekomendasi Terbaik")
+                st.caption(f"Pendamping yang cocok dipadukan dengan {top_food_display}")
 
-                if recommendations:
-                    for i,rec in enumerate(recommendations[:3],1):
-                        st.markdown(
-                            f"""
-                            <div class="rec-card">
-                                <div class="rec-rank">{i}</div>
-                                <div>
-                                    <div class="rec-name">{rec["food"]}</div>
-                                    <div class="rec-reason">{rec.get("reason","")}</div>
-                                </div>
-                                <div class="rec-score">{rec["score"]:.0f}/100</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
+                pair_key = f"{st.session_state.get('last_analysis_id')}|{top_food_display}"
+                if st.session_state.get("pairings_key") != pair_key:
+                    with st.spinner("Menyusun rekomendasi pendamping..."):
+                        st.session_state.pairings = generate_ai_pairings(
+                            st.session_state.child_profile,
+                            str(status["prediction"]),
+                            nutrient_priorities(adequacy),
+                            top_food_display,
+                            recommendations,
                         )
+                    st.session_state.pairings_key = pair_key
+                pairings = st.session_state.get("pairings")
+
+                if pairings:
+                    icon_map = {"minuman": "🥤", "makanan": "🍽️"}
+                    for pr in pairings[:3]:
+                        nama = html.escape(str(pr.get("nama", "-")))
+                        jenis = str(pr.get("jenis", "makanan")).strip().lower()
+                        alasan = html.escape(str(pr.get("alasan", "")))
+                        icon = icon_map.get(jenis, "🍽️")
+                        st.markdown(f"""<div class="rec-card"><div class="rec-rank">{icon}</div><div><div class="rec-name">{nama}</div><div class="rec-reason">{alasan}<br><span style="font-size:.64rem;color:#8A95A8;">pendamping {html.escape(jenis)} • cocok dengan {html.escape(top_food_display)}</span></div></div></div>""", unsafe_allow_html=True)
+                    st.caption("✨ Disusun oleh AI (Gemini)")
+                elif recommendations:
+                    for i, rec in enumerate(recommendations[:3], 1):
+                        rec_category = rec.get("category_label", "menu")
+                        st.markdown(f"""<div class="rec-card"><div class="rec-rank">{i}</div><div><div class="rec-name">{rec["food"]}</div><div class="rec-reason">{rec.get("reason","")}<br><span style="font-size:.64rem;color:#8A95A8;">{rec_category} • pendamping</span></div></div><div class="rec-score">{rec["score"]:.0f}/100</div></div>""", unsafe_allow_html=True)
+                    st.caption("⚙️ Mode offline — aktifkan Gemini untuk saran pendamping spesifik")
                 else:
-                    st.info("Belum ada rekomendasi.")
-
-            priority_html = "".join(
-                f'<span class="priority">✦ {x}</span>'
-                for x in nutrient_priorities(adequacy)
-            )
-
-            st.markdown(
-                f"""
-                <div class="insight">
-                    <b>⭐ Insight & Rekomendasi untuk Anak</b><br><br>
-                    {build_narrative(result)}
-                    <br>{priority_html}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    st.info(result.get("recommendation_note") or "Belum ada rekomendasi yang memenuhi kriteria.")
+            priority_html = "".join(f'<span class="priority">✦ {x}</span>' for x in nutrient_priorities(adequacy))
+            st.markdown(f"""<div class="insight"><b>⭐ Insight & Rekomendasi untuk Anak</b><br><br>{build_narrative_id(result)}<br>{priority_html}</div>""", unsafe_allow_html=True)
 
         with tab2:
-
-            # =====================================================
-            # RINGKASAN ANALISIS NUTRISI
-            # =====================================================
-
-            food_nutrients = (
-                result.get("food_nutrition", {})
-                .get("nutrients", {})
-            )
-
-            best_nutrients = nutrient_best(
-                adequacy,
-                limit=3,
-            )
-
-            biggest_gaps = nutrient_largest_gap(
-                adequacy,
-                limit=3,
-            )
-
-            analyzed_count = sum(
-                1
-                for key in food_nutrients
-                if key in adequacy
-            )
-
+            food_nutrients = result.get("food_nutrition", {}).get("nutrients", {})
+            best_nutrients = nutrient_best(adequacy, limit=3)
+            biggest_gaps = nutrient_largest_gap(adequacy, limit=3)
+            analyzed_count = sum(1 for key in food_nutrients if key in adequacy)
             total_nutrients = len(food_nutrients)
-
-            best_name = "-"
-            best_pct = 0.0
-
+            best_name, best_pct = ("-", 0.0)
             if best_nutrients:
-                best_name = best_nutrients[0]["name"]
-                best_pct = best_nutrients[0]["contribution"]
-
-            gap_name = "-"
-            gap_pct = 0.0
-
+                best_name = best_nutrients[0]["name"]; best_pct = best_nutrients[0]["contribution"]
+            gap_name, gap_pct = ("-", 0.0)
             if biggest_gaps:
-                gap_name = biggest_gaps[0]["name"]
-                gap_pct = biggest_gaps[0]["gap"]
-
-            st.markdown(
-                """
-                <div class="section-kicker">
-                    Nutrition Analysis
-                </div>
-                <div class="section-title">
-                    Analisis Profil Nutrisi
-                </div>
-                <div class="section-sub">
-                    Ringkasan nutrien makanan berdasarkan kandungan
-                    nutrisi dan kontribusinya terhadap acuan AKG.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
+                gap_name = biggest_gaps[0]["name"]; gap_pct = biggest_gaps[0]["gap"]
+            st.markdown("""<div class="section-kicker">Analisis Nutrisi</div><div class="section-title">Analisis Profil Nutrisi</div><div class="section-sub">Ringkasan nutrien makanan berdasarkan kandungan nutrisi dan kontribusinya terhadap acuan AKG.</div>""", unsafe_allow_html=True)
             n1, n2, n3 = st.columns(3)
-
             with n1:
-                st.metric(
-                    "Kontribusi Terbaik",
-                    best_name,
-                )
-                st.caption(
-                    f"{best_pct:.1f}% dari acuan AKG"
-                    if best_nutrients
-                    else "Belum tersedia"
-                )
-
+                st.metric("Kontribusi Terbaik", best_name)
+                st.caption(f"{best_pct:.1f}% dari acuan AKG" if best_nutrients else "Belum tersedia")
             with n2:
-                st.metric(
-                    "Gap Terbesar",
-                    gap_name,
-                )
-                st.caption(
-                    f"{gap_pct:.1f}% masih belum terpenuhi"
-                    if biggest_gaps
-                    else "Belum tersedia"
-                )
-
+                st.metric("Gap Terbesar", gap_name)
+                st.caption(f"{gap_pct:.1f}% masih belum terpenuhi" if biggest_gaps else "Belum tersedia")
             with n3:
-                st.metric(
-                    "Nutrien Dianalisis",
-                    f"{analyzed_count}/{total_nutrients}",
-                )
-                st.caption(
-                    "Nutrien dengan acuan AKG tersedia"
-                )
-            # =====================================================
-            # GRAFIK KONTRIBUSI DAN GAP
-            # =====================================================
-
-            x, y = st.columns(
-                2,
-                gap="large",
-            )
-
+                st.metric("Nutrien Dianalisis", f"{analyzed_count}/{total_nutrients}")
+                st.caption("Nutrien dengan acuan AKG tersedia")
+            if not adequacy:
+                st.info("Profil nutrisi belum dapat dihitung untuk kelas makanan ini. Cek hasil pemetaan nama makanan ke knowledge base nutrisi.")
+            x, y = st.columns(2, gap="large")
             with x:
-                st.plotly_chart(
-                    contribution_chart(adequacy),
-                    use_container_width=True,
-                    config={
-                        "displayModeBar": False
-                    },
-                )
-
+                st.plotly_chart(contribution_chart(adequacy), use_container_width=True, config={"displayModeBar": False})
             with y:
-                st.plotly_chart(
-                    gap_chart(adequacy),
-                    use_container_width=True,
-                    config={
-                        "displayModeBar": False
-                    },
-                )
-
-            # =====================================================
-            # PROFILE NUTRISI LENGKAP
-            # =====================================================
-
-            if (
-                result.get("food_nutrition", {})
-                .get("status") == "ok"
-            ):
-
-                st.markdown(
-                    "#### 📊 Profil Nutrisi Lengkap"
-                )
-
-                nutrition_df = (
-                    complete_nutrition_dataframe(
-                        result,
-                        adequacy,
-                    )
-                )
-
-                st.dataframe(
-                    nutrition_df,
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-                # Nutrien tersedia di food database,
-                # tetapi belum mempunyai perhitungan AKG.
-                missing_analysis = [
-                    key
-                    for key in food_nutrients
-                    if key not in adequacy
-                ]
-
+                st.plotly_chart(gap_chart(adequacy), use_container_width=True, config={"displayModeBar": False})
+            if result.get("food_nutrition", {}).get("status") == "ok":
+                st.markdown("#### 📊 Profil Nutrisi Lengkap")
+                nutrition_df = complete_nutrition_dataframe(result, adequacy)
+                st.dataframe(nutrition_df, hide_index=True, use_container_width=True)
+                missing_analysis = [key for key in food_nutrients if key not in adequacy]
                 if missing_analysis:
-
-                    missing_names = [
-                        DISPLAY_NAMES.get(key, key)
-                        for key in missing_analysis
-                    ]
-
-                    st.info(
-                        "Nutrien berikut sudah ditemukan "
-                        "pada profil makanan tetapi belum "
-                        "mempunyai analisis kontribusi AKG: "
-                        + ", ".join(missing_names)
-                        + "."
-                    )
+                    missing_names = [DISPLAY_NAMES.get(key, key) for key in missing_analysis]
+                    st.info("Nutrien berikut sudah ditemukan pada profil makanan tetapi belum mempunyai analisis kontribusi AKG: " + ", ".join(missing_names) + ".")
 
         with tab3:
             if recommendations:
-                prio_html = "".join(
-                    f'<span class="tag-chip">✦ {x}</span>'
-                    for x in nutrient_priorities(adequacy)
-                )
-
-                st.markdown(
-                    f"""
-                    <div class="rec-hero">
-                        <div class="rec-hero-title">Rekomendasi Makanan Prioritas</div>
-                        <div class="rec-hero-text">
-                            Recommendation engine menyusun kandidat makanan berdasarkan gap nutrisi
-                            yang perlu diprioritaskan. Fokus saat ini: {", ".join(nutrient_priorities(adequacy)) or "kontribusi nutrisi umum"}.
-                        </div>
-                        <div class="tag-row">{prio_html}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                st.markdown(
-                    """
-                    <div class="rec-visual-head">
-                        <div>
-                            <div class="rec-visual-title">Ranking Kandidat Makanan</div>
-                            <div class="rec-visual-sub">
-                                Urutan dibuat berdasarkan skor kecocokan internal.
-                                Coverage menunjukkan jumlah nutrien prioritas yang didukung setiap kandidat.
-                            </div>
-                        </div>
-                        <div class="rec-legend">
-                            <span>★ Ranking</span>
-                            <span>Score 0–100</span>
-                            <span>Coverage nutrisi</span>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
+                prio_html = "".join(f'<span class="tag-chip">✦ {x}</span>' for x in nutrient_priorities(adequacy))
+                method_name = recommendation_meta.get("method", "Age-First Food Suitability + Nutrient Gap Ranking")
+                engine_version = recommendation_meta.get("engine_version", "3.0")
+                rec_age_group = recommendation_meta.get("age_group", age_text(int(st.session_state.child_profile.get("age_months", 0))))
+                st.markdown(f"""<div class="rec-hero"><div class="rec-hero-title">Rekomendasi Makanan Prioritas <span style="font-size:.72rem;color:#7A8699;">• Engine v{engine_version}</span></div><div class="rec-hero-text">Metode <b>{method_name}</b> menggunakan dua tahap. Pertama, sistem melakukan <b>filter keras kesesuaian makanan untuk kelompok umur {rec_age_group}</b>. Kandidat yang berupa bahan ambigu, minuman, camilan, produk olahan, atau tidak sesuai tahap makan tidak masuk ranking. Kedua, hanya kandidat yang lolos filter tersebut yang diperingkat berdasarkan gap nutrisi, cakupan nutrien, dan kualitas kelompok makanan. Fokus nutrisi saat ini: {", ".join(nutrient_priorities(adequacy)) or "kontribusi nutrisi umum"}.</div><div class="tag-row">{prio_html}</div></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class="rec-visual-head"><div><div class="rec-visual-title">Ranking Kandidat Makanan</div><div class="rec-visual-sub">Semua kandidat di bawah sudah lolos filter makanan sesuai kelompok umur. Urutan kemudian ditentukan dari kecocokan gap nutrisi dan kualitas kelompok makanan. Cakupan menunjukkan jumlah nutrien prioritas yang didukung setiap kandidat.</div></div><div class="rec-legend"><span>★ Ranking</span><span>Score 0–100</span><span>Cakupan nutrisi</span></div></div>""", unsafe_allow_html=True)
                 ranking_rows = []
                 for rank, rec in enumerate(recommendations[:5], 1):
-                    score = float(rec.get("score", 0))
-                    coverage = int(rec.get("coverage", 0))
-                    reason = str(rec.get("reason", ""))
+                    score = float(rec.get("score", 0)); coverage = int(rec.get("coverage", 0)); coverage_total = int(rec.get("coverage_total", 0))
+                    reason = str(rec.get("reason", "")); fit_score = float(rec.get("nutrient_fit_score", 0)); quality_score = float(rec.get("quality_score", 0))
                     top_class = " top" if rank == 1 else ""
-
-                    ranking_rows.append(
-                        f'<div class="ranking-row{top_class}">'
-                        f'<div class="rank-number">#{rank}</div>'
-                        f'<div class="rank-food">'
-                        f'<div class="rank-food-name">{rec["food"]}</div>'
-                        f'<div class="rank-reason">{reason}</div>'
-                        f'</div>'
-                        f'<div class="ranking-score">'
-                        f'<div class="rank-score-label"><span>Skor</span><b>{score:.0f}/100</b></div>'
-                        f'<div class="rank-progress"><span style="width:{max(0,min(score,100)):.1f}%"></span></div>'
-                        f'</div>'
-                        f'<div class="rank-coverage">{coverage} nutrien<br>tercakup</div>'
-                        f'</div>'
-                    )
-
-                st.markdown(
-                    '<div class="ranking-board">'
-                    '<div class="ranking-head">'
-                    '<div>Rank</div><div>Makanan</div><div>Skor</div><div>Coverage</div>'
-                    '</div>'
-                    + "".join(ranking_rows)
-                    + '</div>',
-                    unsafe_allow_html=True,
-                )
-
+                    ranking_rows.append(f'<div class="ranking-row{top_class}"><div class="rank-number">#{rank}</div><div class="rank-food"><div class="rank-food-name">{rec["food"]}</div><div class="rank-reason">{reason}<br><span style="font-size:.66rem;color:#98A2B3;">✓ Lolos filter umur • Gap nutrisi {fit_score:.0f} • Kualitas kandidat {quality_score:.0f}</span></div></div><div class="ranking-score"><div class="rank-score-label"><span>Skor</span><b>{score:.0f}/100</b></div><div class="rank-progress"><span style="width:{max(0,min(score,100)):.1f}%"></span></div></div><div class="rank-coverage">{coverage}/{coverage_total or "-"} nutrien<br>tercakup</div></div>')
+                st.markdown('<div class="ranking-board"><div class="ranking-head"><div>Peringkat</div><div>Makanan</div><div>Skor</div><div>Cakupan</div></div>' + "".join(ranking_rows) + '</div>', unsafe_allow_html=True)
                 cols = st.columns(min(3, len(recommendations)))
                 for i, rec in enumerate(recommendations[:3]):
                     with cols[i]:
-                        st.markdown(
-                            f"""
-                            <div class="recommend-card-rich">
-                                <div class="rec-rank-badge">🥗 #{i+1} &nbsp; Kandidat Utama</div>
-                                <div class="food">{rec["food"]}</div>
-                                <div class="score">{rec["score"]:.0f}/100</div>
-                                <div class="reason">{rec.get("reason", "Direkomendasikan untuk membantu menutup gap nutrisi prioritas.")}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-
+                        fit_score = float(rec.get("nutrient_fit_score", 0)); coverage_score = float(rec.get("coverage_score", 0)); quality_score = float(rec.get("quality_score", 0)); category_label = rec.get("category_label", "menu")
+                        st.markdown(f"""<div class="recommend-card-rich"><div class="rec-rank-badge">🥗 #{i+1} &nbsp; Kandidat Utama</div><div class="food">{rec["food"]}</div><div class="score">{rec["score"]:.0f}/100</div><div class="reason">{rec.get("reason", "Direkomendasikan untuk membantu melengkapi gap nutrisi prioritas.")}</div><div style="margin-top:10px;font-size:.67rem;color:#8792A6;line-height:1.6;">{category_label}<br>Gap nutrisi {fit_score:.0f} • Cakupan {coverage_score:.0f}<br>✓ Lolos filter umur • Kualitas kandidat {quality_score:.0f}</div></div>""", unsafe_allow_html=True)
                 if len(recommendations) > 3:
                     st.markdown("#### Kandidat Lain")
                     extra_cols = st.columns(2)
                     for i, rec in enumerate(recommendations[3:5]):
                         with extra_cols[i % 2]:
-                            st.markdown(
-                                f"""
-                                <div class="insight-soft">
-                                    <b>#{i+4} • {rec["food"]}</b><br>
-                                    <span style="color:#0A9F76;font-weight:900;">{rec["score"]:.0f}/100</span><br>
-                                    <span style="color:#8792A6;font-size:.74rem;line-height:1.58;">{rec.get("reason", "")}</span>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-                st.markdown(
-                    '<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;">'
-                    'Skor rekomendasi adalah skor kecocokan internal berbasis gap nutrisi, bukan nilai mutu absolut suatu makanan.'
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
+                            st.markdown(f"""<div class="insight-soft"><b>#{i+4} • {rec["food"]}</b><br><span style="color:#0A9F76;font-weight:900;">{rec["score"]:.0f}/100</span><br><span style="color:#8792A6;font-size:.74rem;line-height:1.58;">{rec.get("reason", "")}</span></div>""", unsafe_allow_html=True)
+                st.markdown('<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;"><b>Cara membaca rekomendasi:</b> tahap pertama adalah <b>hard age-food gate</b>; kandidat yang tidak sesuai kelompok umur atau berupa bahan/minuman/camilan/produk ambigu langsung dikeluarkan. Setelah lolos, skor ranking dihitung dari 70% kecocokan gap nutrisi + 15% cakupan nutrien + 15% kualitas kelompok makanan. Bobot tersebut adalah aturan desain ranking internal, bukan bobot klinis. Gap berasal dari makanan yang dianalisis terhadap acuan kelompok umur dan bukan diagnosis kekurangan nutrisi anak.</div>', unsafe_allow_html=True)
             else:
-                st.info("Recommendation engine belum menghasilkan kandidat.")
+                st.info(result.get("recommendation_note") or "Mesin rekomendasi belum menghasilkan kandidat yang memenuhi kriteria.")
 
         with tab4:
             try:
-                heat, idx, conf, layer_info = make_gradcam(
-                    image,
-                    convnext_model,
-                )
+                heat, idx, conf, layer_info = make_gradcam(image, convnext_model)
                 overlay = overlay_gradcam(image, heat)
                 colored_heat = colorize_gradcam(heat)
-
-                pred_label = (
-                    class_names[idx]
-                    if 0 <= idx < len(class_names)
-                    else f"Kelas {idx}"
-                )
-
-                st.markdown(
-                    f"""
-                    <div class="xai-hero">
-                        <div class="xai-intro">
-                            <div class="xai-intro-title">Grad-CAM • Explainable AI Workspace</div>
-                            <div class="xai-intro-text">
-                                Visualisasi ini membantu melihat area citra yang relatif lebih berpengaruh
-                                pada keputusan <b>branch ConvNeXt V2 Tiny</b>. Ini bukan penjelasan penuh
-                                keputusan ensemble ConvNeXt + NoisyViT.
-                            </div>
-                        </div>
-                        <div class="xai-stat">
-                            <div class="xai-stat-label">Prediksi Branch</div>
-                            <div class="xai-stat-value">{pred_label}</div>
-                        </div>
-                        <div class="xai-stat">
-                            <div class="xai-stat-label">Confidence</div>
-                            <div class="xai-stat-value">{conf*100:.2f}%</div>
-                        </div>
-                        <div class="xai-stat">
-                            <div class="xai-stat-label">Explainability</div>
-                            <div class="xai-stat-value">ConvNeXt</div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
+                pred_label_raw = class_names[idx] if (class_names and 0 <= idx < len(class_names)) else f"Kelas {idx}"
+                pred_label = food_display_name(pred_label_raw)
+                st.markdown(f"""<div class="xai-hero"><div class="xai-intro"><div class="xai-intro-title">Grad-CAM • Explainable AI Workspace</div><div class="xai-intro-text">Visualisasi ini membantu melihat area citra yang relatif lebih berpengaruh pada keputusan <b>branch ConvNeXt V2 Tiny</b>. Ini bukan penjelasan penuh keputusan ensemble ConvNeXt + NoisyViT.</div></div><div class="xai-stat"><div class="xai-stat-label">Prediksi Branch</div><div class="xai-stat-value">{pred_label}</div></div><div class="xai-stat"><div class="xai-stat-label">Keyakinan</div><div class="xai-stat-value">{conf*100:.2f}%</div></div><div class="xai-stat"><div class="xai-stat-label">Explainability</div><div class="xai-stat-value">ConvNeXt</div></div></div>""", unsafe_allow_html=True)
                 c1, c2, c3 = st.columns(3, gap="large")
-
                 with c1:
                     with st.container(key="grad_original"):
-                        st.markdown(
-                            '<div class="grad-card-head"><div class="grad-card-title">Foto Input</div><div class="grad-card-badge">ORIGINAL</div></div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.image(
-                            image.resize((224, 224)),
-                            use_container_width=True,
-                        )
-
+                        st.markdown('<div class="grad-card-head"><div class="grad-card-title">Foto Input</div><div class="grad-card-badge">ORIGINAL</div></div>', unsafe_allow_html=True)
+                        st.image(image.resize((224, 224)), use_container_width=True)
                 with c2:
                     with st.container(key="grad_heatmap"):
-                        st.markdown(
-                            '<div class="grad-card-head"><div class="grad-card-title">Activation Map</div><div class="grad-card-badge">HEATMAP</div></div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.image(
-                            colored_heat,
-                            use_container_width=True,
-                        )
-
+                        st.markdown('<div class="grad-card-head"><div class="grad-card-title">Activation Map</div><div class="grad-card-badge">HEATMAP</div></div>', unsafe_allow_html=True)
+                        st.image(colored_heat, use_container_width=True)
                 with c3:
                     with st.container(key="grad_overlay"):
-                        st.markdown(
-                            '<div class="grad-card-head"><div class="grad-card-title">Model Attention Overlay</div><div class="grad-card-badge">OVERLAY</div></div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.image(
-                            overlay,
-                            use_container_width=True,
-                        )
-
-                st.markdown(
-                    f"""
-                    <div class="xai-explain-grid">
-                        <div class="xai-explain">
-                            <b>Cara membaca:</b> area dengan aktivasi lebih kuat menunjukkan region yang
-                            relatif lebih banyak memengaruhi keluaran branch ConvNeXt ketika memprediksi
-                            <b>{pred_label}</b>. Heatmap sebaiknya dibaca bersama foto asli dan overlay,
-                            bukan sebagai segmentasi objek atau bukti kausal.
-                        </div>
-                        <div class="xai-layer">
-                            <div class="label">TARGET FEATURE LAYER</div>
-                            <div class="value">{layer_info}</div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
+                        st.markdown('<div class="grad-card-head"><div class="grad-card-title">Model Attention Overlay</div><div class="grad-card-badge">OVERLAY</div></div>', unsafe_allow_html=True)
+                        st.image(overlay, use_container_width=True)
+                st.markdown(f"""<div class="xai-explain-grid"><div class="xai-explain"><b>Cara membaca:</b> area dengan aktivasi lebih kuat menunjukkan region yang relatif lebih banyak memengaruhi keluaran branch ConvNeXt ketika memprediksi <b>{pred_label}</b>. Heatmap sebaiknya dibaca bersama foto asli dan overlay, bukan sebagai segmentasi objek atau bukti kausal.</div><div class="xai-layer"><div class="label">TARGET FEATURE LAYER</div><div class="value">{layer_info}</div></div></div>""", unsafe_allow_html=True)
             except Exception as exc:
                 st.warning("Grad-CAM belum dapat divisualisasikan.")
                 st.code(str(exc))
 
         with tab5:
             ensemble_info = result.get("ensemble", {})
-
-            st.markdown(
-                f"""
-                <div class="model-pill-grid">
-                    <div class="model-pill">
-                        <div class="model-pill-label">Backbone 1</div>
-                        <div class="model-pill-value">ConvNeXt V2 Tiny</div>
-                        <div class="model-pill-note">Cabang CNN untuk pengenalan citra makanan.</div>
-                    </div>
-                    <div class="model-pill">
-                        <div class="model-pill-label">Backbone 2</div>
-                        <div class="model-pill-value">NoisyViT B/16</div>
-                        <div class="model-pill-note">Cabang transformer untuk visual representation.</div>
-                    </div>
-                    <div class="model-pill">
-                        <div class="model-pill-label">Metode Fusi</div>
-                        <div class="model-pill-value">Weighted Soft Voting</div>
-                        <div class="model-pill-note">Bobot saat ini ConvNeXt {ensemble_info.get('convnext_weight', 0.5):.0%} • NoisyViT {ensemble_info.get('noisyvit_weight', 0.5):.0%}.</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
+            st.markdown(f"""<div class="model-pill-grid"><div class="model-pill"><div class="model-pill-label">Backbone 1</div><div class="model-pill-value">ConvNeXt V2 Tiny</div><div class="model-pill-note">Cabang CNN untuk pengenalan citra makanan.</div></div><div class="model-pill"><div class="model-pill-label">Backbone 2</div><div class="model-pill-value">NoisyViT B/16</div><div class="model-pill-note">Cabang transformer untuk visual representation.</div></div><div class="model-pill"><div class="model-pill-label">Metode Fusi</div><div class="model-pill-value">Weighted Soft Voting</div><div class="model-pill-note">Bobot saat ini ConvNeXt {ensemble_info.get('convnext_weight', 0.5):.0%} • NoisyViT {ensemble_info.get('noisyvit_weight', 0.5):.0%}.</div></div></div>""", unsafe_allow_html=True)
             left_model, right_model = st.columns([1.35, .95], gap="large")
             with left_model:
-                st.plotly_chart(
-                    model_compare_chart(preds),
-                    use_container_width=True,
-                    config={"displayModeBar": False},
-                )
-
+                st.plotly_chart(model_compare_chart(preds), use_container_width=True, config={"displayModeBar": False})
             with right_model:
-                st.plotly_chart(
-                    ensemble_weight_chart(ensemble_info),
-                    use_container_width=True,
-                    config={"displayModeBar": False},
-                )
+                st.plotly_chart(ensemble_weight_chart(ensemble_info), use_container_width=True, config={"displayModeBar": False})
+            st.dataframe(pd.DataFrame([{"Kelas": food_display_name(p["food"]), "Ensemble (%)": round(p["confidence"] * 100, 2), "ConvNeXt (%)": round(p.get("convnext_confidence", 0) * 100, 2), "NoisyViT (%)": round(p.get("noisyvit_confidence", 0) * 100, 2)} for p in preds]), hide_index=True, use_container_width=True)
+            st.markdown('''<div class="flow-grid"><div class="flow-node"><div class="num">01</div><div class="title">Input Antropometri</div><div class="text">Umur, berat, tinggi, dan MUAC/LILA diproses oleh model screening status gizi.</div></div><div class="flow-node"><div class="num">02</div><div class="title">Input Foto Makanan</div><div class="text">Satu foto makanan diproses paralel oleh ConvNeXt V2 Tiny dan NoisyViT B/16.</div></div><div class="flow-node"><div class="num">03</div><div class="title">Ensemble Prediction</div><div class="text">Dua probabilitas keluaran digabung menggunakan weighted soft voting untuk menghasilkan prediksi final 53 kelas.</div></div><div class="flow-node"><div class="num">04</div><div class="title">Nutrition Mapping</div><div class="text">Kelas makanan dipetakan ke knowledge base nutrisi, lalu dibandingkan dengan AKG kelompok umur.</div></div><div class="flow-node"><div class="num">05</div><div class="title">Gap Analysis</div><div class="text">Sistem menghitung kontribusi dan gap nutrisi prioritas dari makanan yang terdeteksi.</div></div><div class="flow-node"><div class="num">06</div><div class="title">Rekomendasi Berbasis Umur & Gap</div><div class="text">Kandidat makanan diranking berdasarkan gap nutrisi, cakupan, kesesuaian kelompok umur, dan kualitas kategori makanan.</div></div></div>''', unsafe_allow_html=True)
+            st.caption("Detail model menampilkan keluaran ensemble, kontribusi masing-masing branch, serta alur pemrosesan NutriVision AI secara ringkas.")
 
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Kelas": p["food"],
-                            "Ensemble (%)": round(p["confidence"] * 100, 2),
-                            "ConvNeXt (%)": round(p.get("convnext_confidence", 0) * 100, 2),
-                            "NoisyViT (%)": round(p.get("noisyvit_confidence", 0) * 100, 2),
-                        }
-                        for p in preds
-                    ]
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.markdown(
-                '''
-                <div class="flow-grid">
-                    <div class="flow-node"><div class="num">01</div><div class="title">Input Antropometri</div><div class="text">Umur, berat, tinggi, dan MUAC/LILA diproses oleh model screening status gizi.</div></div>
-                    <div class="flow-node"><div class="num">02</div><div class="title">Input Foto Makanan</div><div class="text">Satu foto makanan diproses paralel oleh ConvNeXt V2 Tiny dan NoisyViT B/16.</div></div>
-                    <div class="flow-node"><div class="num">03</div><div class="title">Ensemble Prediction</div><div class="text">Dua probabilitas keluaran digabung menggunakan weighted soft voting untuk menghasilkan prediksi final 53 kelas.</div></div>
-                    <div class="flow-node"><div class="num">04</div><div class="title">Nutrition Mapping</div><div class="text">Kelas makanan dipetakan ke knowledge base nutrisi, lalu dibandingkan dengan AKG kelompok umur.</div></div>
-                    <div class="flow-node"><div class="num">05</div><div class="title">Gap Analysis</div><div class="text">Sistem menghitung kontribusi dan gap nutrisi prioritas dari makanan yang terdeteksi.</div></div>
-                    <div class="flow-node"><div class="num">06</div><div class="title">Recommendation Engine</div><div class="text">Engine memberi ranking makanan pendamping yang lebih relevan dengan kebutuhan nutrisi.</div></div>
-                </div>
-                ''',
-                unsafe_allow_html=True,
-            )
-
-            st.caption(
-                "Detail model menampilkan keluaran ensemble, kontribusi masing-masing branch, serta alur pemrosesan NutriVision AI secara ringkas."
-            )
-
+        with tab6:
+            st.markdown("""<div class="section-kicker">Menu Harian</div><div class="section-title">Rencana Menu Sehari</div><div class="section-sub">Pilih waktu makan dari foto tadi, lalu sistem menyusun waktu makan lainnya agar kebutuhan gizi sehari lebih terpenuhi. Edukatif, bukan resep diet klinis.</div>""", unsafe_allow_html=True)
+            meal_time = st.radio("Foto tadi dimakan pada waktu:", ["Sarapan", "Makan Siang", "Camilan Sore", "Makan Malam"], horizontal=True, key="meal_time_slot")
+            plan_priorities = nutrient_priorities(adequacy)
+            with st.spinner("Menyusun menu harian..."):
+                ai_plan = generate_ai_meal_plan(st.session_state.child_profile, str(status["prediction"]), plan_priorities, top_food_display, recommendations, meal_time)
+            if ai_plan and ai_plan.get("meals"):
+                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "✨ Disusun oleh AI (Gemini)"
+            else:
+                meals = build_meal_plan(top_food_display, recommendations, plan_priorities, meal_time)
+                closing = "Menu disusun otomatis dari recommendation engine. Aktifkan mode AI (Gemini) untuk hasil lebih personal."
+                source_label = "⚙️ Disusun otomatis (offline)"
+            focus_text = ", ".join(plan_priorities) if plan_priorities else "gizi seimbang umum"
+            st.markdown(f'<div class="rec-hero"><div class="rec-hero-title">{source_label}</div><div class="rec-hero-text">Foto dikunci sebagai <b>{html.escape(meal_time)}</b>. Sistem menyusun waktu makan lain untuk melengkapi: <b>{html.escape(focus_text)}</b>.</div></div>', unsafe_allow_html=True)
+            for m in meals:
+                waktu = html.escape(str(m.get("waktu", "-"))); menu = html.escape(str(m.get("menu", "-"))); alasan = html.escape(str(m.get("alasan", "")))
+                is_locked = str(m.get("waktu", "")).strip().lower() == meal_time.strip().lower()
+                badge = "📷" if is_locked else "🍽️"
+                st.markdown(f'<div class="rec-card"><div class="rec-rank">{badge}</div><div><div class="rec-name">{waktu} — {menu}</div><div class="rec-reason">{alasan}</div></div></div>', unsafe_allow_html=True)
+            if closing:
+                st.markdown(f'<div class="dark-note" style="color:#59677E;background:#FBFCFE;border:1px solid #E8EDF5;margin-top:10px;">{html.escape(closing)}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="action-note" style="margin-top:12px;"><span class="note-icon">◇</span><span>Rencana ini edukatif. Untuk anak dengan indikasi gangguan gizi, konsultasikan menu dengan dokter anak atau ahli gizi.</span></div>', unsafe_allow_html=True)
 
 # ============================================================
 # RIWAYAT ANALISIS
