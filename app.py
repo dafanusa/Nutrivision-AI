@@ -1,6 +1,6 @@
 # =============================================================================
 # NutriVision AI — Skrining Gizi Anak Berbasis AI
-# © 2026 Tim Orang Baek — Universitas Muhammadiyah Malang (UMM)
+# © 2026 Tim Sang Surya 1 — Universitas Muhammadiyah Malang (UMM)
 # Hak cipta dilindungi. Dikembangkan untuk keperluan lomba/edukasi.
 # =============================================================================
 
@@ -6508,7 +6508,7 @@ if page == "Dashboard":
                         alasan = html.escape(str(pr.get("alasan", "")))
                         icon = icon_map.get(jenis, "🍽️")
                         st.markdown(f"""<div class="rec-card"><div class="rec-rank">{icon}</div><div><div class="rec-name">{nama}</div><div class="rec-reason">{alasan}<br><span style="font-size:.64rem;color:#8A95A8;">pendamping {html.escape(jenis)} • cocok dengan {html.escape(top_food_display)}</span></div></div></div>""", unsafe_allow_html=True)
-                    st.caption("Disusun oleh Tim Orang Baek — Universitas Muhammadiyah Malang (UMM)")
+                    st.caption("Disusun oleh Tim Sang Surya 1 — Universitas Muhammadiyah Malang (UMM)")
                 elif recommendations:
                     for i, rec in enumerate(recommendations[:3], 1):
                         rec_category = rec.get("category_label", "menu")
@@ -6613,7 +6613,7 @@ if page == "Dashboard":
             with st.spinner("Menyusun menu harian..."):
                 ai_plan = generate_ai_meal_plan(st.session_state.child_profile, str(status["prediction"]), plan_priorities, top_food_display, recommendations, meal_time)
             if ai_plan and ai_plan.get("meals"):
-                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "Disusun oleh Tim Orang Baek — UMM"
+                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "Disusun oleh Tim Sang Surya 1 — UMM"
             else:
                 meals = build_meal_plan(top_food_display, recommendations, plan_priorities, meal_time)
                 closing = "Menu disusun otomatis dari recommendation engine. Aktifkan mode AI (Gemini) untuk hasil lebih personal."
@@ -7252,7 +7252,7 @@ st.markdown(
             </div>
         </div>
         <div class="footer-bottom">
-            <div class="footer-copy">© {_year} Tim Orang Baek • Universitas Muhammadiyah Malang (UMM)</div>
+            <div class="footer-copy">© {_year} Tim Sang Surya 1 • Universitas Muhammadiyah Malang (UMM)</div>
             <div class="footer-disclaimer">
                 Dibuat untuk tujuan edukasi. Satu foto tidak mewakili asupan 24 jam, dan
                 rekomendasi bukan pengganti tenaga kesehatan profesional.
