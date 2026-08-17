@@ -1,3 +1,10 @@
+# =============================================================================
+# NutriVision AI — Skrining Gizi Anak Berbasis AI
+# © 2026 Tim Orang Baek — Universitas Muhammadiyah Malang (UMM)
+# Hak cipta dilindungi. Dikembangkan untuk keperluan lomba/edukasi.
+# =============================================================================
+
+
 from pathlib import Path
 import base64
 import io
@@ -13,6 +20,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image, ImageOps
 
+import torch
+import torch.nn as nn
+import timm
+
 from src.inference import (
     DEFAULT_ENSEMBLE_WEIGHTS,
     analyze_child_and_food,
@@ -22,6 +33,7 @@ from src.inference import (
     make_gradcam,
     overlay_gradcam,
 )
+from src import inference as _inference
 from src.nutrition import (
     DISPLAY_NAMES,
     NUTRIENT_UNITS,
@@ -4359,15 +4371,725 @@ section[data-testid="stSidebar"] [role="radiogroup"] label > div:has(input[type=
     unsafe_allow_html=True,
 )
 
+# ============================================================
+# STYLE — PREMIUM REFINEMENT LAYER (loaded after base styles)
+# Warna & struktur dipertahankan; hanya tampilan yang dipoles.
+# ============================================================
+st.markdown(
+    """
+<style>
+/* ============================================================
+   PREMIUM REFINEMENT LAYER  —  clean / premium re-skin
+   Palette (gold + navy) and page structure are preserved.
+   This layer is loaded AFTER the base styles, so it wins the
+   cascade on the surfaces below without touching the base
+   responsive rules or Streamlit-specific selectors.
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --pj:'Plus Jakarta Sans', Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --body:'Inter', var(--pj);
+    --ink-1:#0F1B33;
+    --ink-2:#3B475F;
+    --ink-3:#6C7889;
+    --hair:#ECEFF4;
+    --hair-2:#E3E8EF;
+    --paper:#FFFFFF;
+    --r-lg:22px;
+    --r-md:18px;
+    --r-sm:13px;
+    --e1:0 1px 2px rgba(16,27,51,.05), 0 2px 6px rgba(16,27,51,.04);
+    --e2:0 2px 4px rgba(16,27,51,.03), 0 16px 38px rgba(16,27,51,.07);
+    --e3:0 6px 12px rgba(16,27,51,.05), 0 28px 60px rgba(16,27,51,.11);
+    --gold-grad:linear-gradient(105deg,#FFD75A 0%,#FFC01F 100%);
+    --navy-grad:linear-gradient(150deg,#143260 0%,#0B1F3E 58%,#081A34 100%);
+}
+
+/* ---------- Base surface & typography ---------- */
+html, body, [data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(1100px 480px at 100% -8%, rgba(255,201,40,.055), transparent 60%),
+        radial-gradient(920px 520px at -8% 6%, rgba(20,50,96,.045), transparent 55%),
+        linear-gradient(180deg,#FCFDFF 0%,#F3F6FB 100%) !important;
+    color:var(--ink-1) !important;
+    font-family:var(--body) !important;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+}
+.block-container { max-width:1440px !important; }
+
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stMarkdownContainer"] h4 {
+    font-family:var(--pj) !important;
+    color:var(--ink-1) !important;
+    font-weight:800 !important;
+    letter-spacing:-.025em !important;
+}
+[data-testid="stMarkdownContainer"] h2 { font-size:1.55rem !important; }
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p {
+    color:var(--ink-3) !important;
+    font-size:.82rem !important;
+    line-height:1.6 !important;
+}
+
+/* ---------- Header height a touch airier ---------- */
+[data-testid="stHeader"] {
+    background:rgba(250,251,253,.82) !important;
+    backdrop-filter:blur(12px) !important;
+    border-bottom:1px solid rgba(236,239,244,.7) !important;
+}
+
+/* ============================================================
+   SIDEBAR  —  premium product navigation
+   ============================================================ */
+[data-testid="stSidebar"] {
+    background:
+        radial-gradient(280px 220px at 28% 2%, rgba(46,88,150,.38), transparent 72%),
+        var(--navy-grad) !important;
+    border-right:1px solid rgba(255,255,255,.06) !important;
+}
+.brand-name {
+    font-family:var(--pj) !important;
+    letter-spacing:-.02em !important;
+    font-weight:800 !important;
+}
+.brand-sub { letter-spacing:.12em !important; text-transform:uppercase; }
+.brand-logo-img { filter:drop-shadow(0 12px 22px rgba(255,201,40,.20)) !important; }
+
+[data-testid="stSidebar"] [role="radiogroup"] > label {
+    border-radius:14px !important;
+    transition:background .18s ease, transform .18s ease !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label p {
+    font-family:var(--pj) !important;
+    font-weight:600 !important;
+    letter-spacing:.005em !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] > label:hover {
+    background:rgba(255,255,255,.06) !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+    background:linear-gradient(100deg,rgba(255,201,40,.16),rgba(255,255,255,.02)) !important;
+    border:1px solid rgba(255,201,40,.24) !important;
+    box-shadow:inset 3px 0 0 var(--gold), 0 10px 22px rgba(0,0,0,.20) !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked)::before {
+    box-shadow:0 8px 16px rgba(255,201,40,.24) !important;
+}
+.about-card {
+    border:1px solid rgba(255,255,255,.10) !important;
+    border-radius:16px !important;
+    background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.02)) !important;
+}
+
+/* ============================================================
+   HERO  —  landing-grade header
+   ============================================================ */
+.hero-shell {
+    border:1px solid var(--hair) !important;
+    border-radius:26px !important;
+    background:
+        radial-gradient(680px 320px at 96% -22%, rgba(255,201,40,.20), transparent 62%),
+        radial-gradient(520px 300px at 76% 122%, rgba(20,50,96,.05), transparent 60%),
+        linear-gradient(115deg,#FFFFFF 0%,#FFFFFF 52%,#FFFCF3 100%) !important;
+    box-shadow:var(--e2) !important;
+}
+.hero-shell:before { border-color:rgba(255,201,40,.10) !important; }
+.hero-eyebrow {
+    background:rgba(255,201,40,.12) !important;
+    border:1px solid rgba(224,168,15,.34) !important;
+    color:#8A6600 !important;
+    border-radius:999px !important;
+    font-family:var(--pj) !important;
+    font-weight:700 !important;
+    letter-spacing:.11em !important;
+    text-transform:uppercase;
+}
+.title {
+    font-family:var(--pj) !important;
+    font-weight:800 !important;
+    letter-spacing:-.045em !important;
+}
+.title span { color:#EDAE00 !important; }
+.subtitle { color:var(--ink-3) !important; line-height:1.7 !important; }
+.date-pill, .tech-chip {
+    border:1px solid var(--hair-2) !important;
+    background:rgba(255,255,255,.9) !important;
+    color:var(--ink-2) !important;
+    border-radius:999px !important;
+    box-shadow:var(--e1) !important;
+    backdrop-filter:blur(6px);
+    font-family:var(--pj) !important;
+    font-weight:600 !important;
+}
+.tech-chip { transition:transform .16s ease, box-shadow .16s ease; }
+.tech-chip:hover { transform:translateY(-1px); box-shadow:var(--e2) !important; }
+
+/* ============================================================
+   SECTION HEADERS
+   ============================================================ */
+.section-kicker {
+    color:#B07E00 !important;
+    font-family:var(--pj) !important;
+    letter-spacing:.14em !important;
+}
+.section-title, .panel-title, .about-flow-title,
+.profile-form-title, .profile-visual-title,
+.rec-visual-title, .kpi-value, .result-value,
+.model-pill-value, .xai-intro-title, .xai-stat-value {
+    font-family:var(--pj) !important;
+    letter-spacing:-.02em !important;
+}
+.section-sub, .panel-sub { color:var(--ink-3) !important; }
+
+/* ============================================================
+   WORKFLOW STRIP
+   ============================================================ */
+.workflow-strip {
+    border:1px solid var(--hair) !important;
+    border-radius:var(--r-md) !important;
+    box-shadow:var(--e1) !important;
+}
+.workflow-number {
+    background:var(--gold-grad) !important;
+    box-shadow:0 8px 16px rgba(255,192,45,.22) !important;
+}
+.workflow-title { font-family:var(--pj) !important; }
+.workflow-arrow { background:#F3F6FB !important; }
+
+/* ============================================================
+   UNIFIED CARD SYSTEM  —  soft elevation, gold hairline accent
+   ============================================================ */
+/* Large panels */
+.st-key-child_card,
+.st-key-photo_card,
+.st-key-profile_form_card,
+.st-key-profile_visual_card,
+.about-equal-panel,
+.ranking-board,
+.section-card {
+    border:1px solid var(--hair) !important;
+    border-radius:var(--r-lg) !important;
+    box-shadow:var(--e2) !important;
+}
+/* Medium cards */
+.kpi-card,
+.nutrient-tile,
+.model-pill,
+.result-card,
+.info-card,
+.recommend-card-rich,
+.rec-hero,
+.xai-intro,
+.xai-stat,
+.flow-node,
+.st-key-grad_original,
+.st-key-grad_heatmap,
+.st-key-grad_overlay {
+    border:1px solid var(--hair) !important;
+    border-radius:var(--r-md) !important;
+    box-shadow:var(--e1) !important;
+}
+/* Charts & tables share the language */
+div[data-testid="stPlotlyChart"],
+[data-testid="stDataFrame"] {
+    border:1px solid var(--hair) !important;
+    border-radius:var(--r-md) !important;
+    box-shadow:var(--e1) !important;
+}
+
+/* Dark cards keep navy identity, refined depth */
+.st-key-action_card,
+.section-card-dark {
+    border:1px solid rgba(20,46,86,.55) !important;
+    border-radius:var(--r-lg) !important;
+    background:
+        radial-gradient(circle at 88% 10%, rgba(255,255,255,.08), transparent 9rem),
+        var(--navy-grad) !important;
+    box-shadow:0 22px 50px rgba(9,26,52,.22) !important;
+}
+
+/* Subtle premium hover-lift on free-standing cards */
+.kpi-card, .nutrient-tile, .model-pill, .result-card, .recommend-card-rich {
+    transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease !important;
+}
+.kpi-card:hover, .nutrient-tile:hover, .model-pill:hover,
+.result-card:hover, .recommend-card-rich:hover {
+    transform:translateY(-2px);
+    box-shadow:var(--e3) !important;
+    border-color:#E7D9A6 !important;
+}
+
+/* Card headings & numeric emphasis */
+.kpi-value, .result-value, .model-pill-value,
+.nutrient-title, .rec-hero-title, .info-card-title,
+.recommend-card-rich .food { font-family:var(--pj) !important; }
+.nutrient-icon, .result-icon {
+    background:linear-gradient(180deg,#FFF3C6,#FFE9A0) !important;
+    color:#9B7400 !important;
+    border-radius:12px !important;
+}
+.about-cap-icon { background:linear-gradient(180deg,#FFF3C6,#FFE9A0) !important; border-radius:12px !important; }
+
+/* ============================================================
+   CHIPS / TAGS / BADGES / PILLS
+   ============================================================ */
+.tag-chip, .cta-badge, .rec-rank-badge, .grad-card-badge,
+.priority, .rec-legend span {
+    font-family:var(--pj) !important;
+    font-weight:700 !important;
+}
+.tag-chip {
+    background:rgba(255,201,40,.12) !important;
+    border:1px solid rgba(224,168,15,.32) !important;
+    color:#8A6600 !important;
+}
+
+/* ============================================================
+   FORM CONTROLS  —  crisp inputs, gold focus ring
+   ============================================================ */
+[data-testid="stNumberInput"] input,
+[data-testid="stTextInput"] input {
+    border:1px solid var(--hair-2) !important;
+    border-radius:12px !important;
+    font-family:var(--body) !important;
+    transition:border-color .16s ease, box-shadow .16s ease !important;
+}
+[data-testid="stNumberInput"] input:focus,
+[data-testid="stTextInput"] input:focus {
+    border-color:#F0C64A !important;
+    box-shadow:0 0 0 3px rgba(255,201,40,.20) !important;
+    outline:none !important;
+}
+label[data-testid="stWidgetLabel"] p { font-family:var(--pj) !important; }
+[data-testid="stMetric"] {
+    background:#F8FAFD !important;
+    border:1px solid var(--hair) !important;
+    border-radius:14px !important;
+}
+[data-testid="stMetricValue"] { font-family:var(--pj) !important; }
+
+[data-testid="stFileUploader"] {
+    background:linear-gradient(180deg,#FFFDF7,#FFF8E9) !important;
+    border:1.5px dashed #EDBE33 !important;
+    border-radius:var(--r-md) !important;
+}
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+.stButton > button {
+    font-family:var(--pj) !important;
+    border-radius:12px !important;
+    transition:transform .16s ease, box-shadow .16s ease, background .16s ease !important;
+}
+.st-key-action_card .stButton > button {
+    background:var(--gold-grad) !important;
+    border:1px solid #F2B400 !important;
+    color:#15213B !important;
+    box-shadow:0 12px 28px rgba(255,193,34,.30) !important;
+}
+.st-key-action_card .stButton > button:hover:not(:disabled) {
+    transform:translateY(-1px);
+    box-shadow:0 16px 34px rgba(255,193,34,.40) !important;
+}
+.st-key-photo_card .stButton > button:hover {
+    transform:translateY(-1px);
+}
+
+/* ============================================================
+   TABS
+   ============================================================ */
+[data-baseweb="tab-list"] {
+    border:1px solid var(--hair) !important;
+    border-radius:14px !important;
+    background:#F2F5F9 !important;
+}
+button[data-baseweb="tab"] { font-family:var(--pj) !important; }
+button[data-baseweb="tab"][aria-selected="true"] {
+    background:#FFFFFF !important;
+    box-shadow:var(--e1) !important;
+}
+
+/* ============================================================
+   INSIGHT / SOFT NOTES
+   ============================================================ */
+.insight, .xai-explain {
+    border:1px solid #EFDD98 !important;
+    border-radius:var(--r-md) !important;
+    background:linear-gradient(115deg,#FFFDF4,#FFF7D6) !important;
+}
+.rec-hero { background:linear-gradient(120deg,#FFF9E0,#FFFFFF) !important; }
+
+/* ============================================================
+   TENTANG APLIKASI  —  website "About" components
+   ============================================================ */
+.about-band {
+    position:relative;
+    overflow:hidden;
+    margin:6px 0 20px;
+    padding:34px 36px;
+    border:1px solid var(--hair);
+    border-radius:26px;
+    background:
+        radial-gradient(560px 260px at 92% -30%, rgba(255,201,40,.16), transparent 62%),
+        linear-gradient(118deg,#FFFFFF 0%,#FFFFFF 58%,#FFFCF3 100%);
+    box-shadow:var(--e2);
+}
+.about-band::after {
+    content:"";
+    position:absolute;
+    right:-70px; bottom:-120px;
+    width:240px; height:240px;
+    border-radius:50%;
+    border:24px solid rgba(255,201,40,.10);
+}
+.about-band-eyebrow {
+    display:inline-flex; align-items:center; gap:7px;
+    padding:7px 13px; border-radius:999px;
+    background:rgba(255,201,40,.12);
+    border:1px solid rgba(224,168,15,.34);
+    color:#8A6600;
+    font-family:var(--pj); font-weight:700;
+    font-size:.66rem; letter-spacing:.12em; text-transform:uppercase;
+}
+.about-band-eyebrow::before { content:"✦"; color:#DBA300; }
+.about-band-title {
+    max-width:820px;
+    margin-top:16px;
+    font-family:var(--pj);
+    font-size:2.05rem;
+    line-height:1.12;
+    font-weight:800;
+    letter-spacing:-.04em;
+    color:var(--ink-1);
+}
+.about-band-title span { color:#EDAE00; }
+.about-band-lead {
+    max-width:760px;
+    margin-top:14px;
+    color:var(--ink-3);
+    font-size:.95rem;
+    line-height:1.72;
+}
+
+.about-section-head { margin:26px 0 14px; }
+.about-section-kicker {
+    color:#B07E00;
+    font-family:var(--pj); font-weight:800;
+    font-size:.68rem; letter-spacing:.14em; text-transform:uppercase;
+    margin-bottom:5px;
+}
+.about-section-title {
+    font-family:var(--pj);
+    font-size:1.3rem; font-weight:800;
+    letter-spacing:-.025em; color:var(--ink-1);
+}
+.about-section-sub { color:var(--ink-3); font-size:.82rem; margin-top:4px; }
+
+/* Values grid */
+.about-values {
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:14px;
+}
+.about-value-card {
+    padding:20px 20px 18px;
+    border:1px solid var(--hair);
+    border-radius:var(--r-md);
+    background:linear-gradient(180deg,#FFFFFF,#FBFCFE);
+    box-shadow:var(--e1);
+    transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+.about-value-card:hover {
+    transform:translateY(-2px);
+    box-shadow:var(--e3);
+    border-color:#E7D9A6;
+}
+.about-value-icon {
+    width:44px; height:44px;
+    display:grid; place-items:center;
+    border-radius:13px;
+    background:linear-gradient(180deg,#FFF3C6,#FFE59A);
+    color:#9B7400; font-size:1.15rem;
+    margin-bottom:13px;
+}
+.about-value-title {
+    font-family:var(--pj); font-weight:800;
+    font-size:1rem; color:var(--ink-1); margin-bottom:6px;
+}
+.about-value-text { color:var(--ink-3); font-size:.82rem; line-height:1.65; }
+
+/* Tech stack strip */
+.about-tech {
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:12px;
+}
+.about-tech-item {
+    padding:16px 16px 15px;
+    border:1px solid var(--hair);
+    border-radius:var(--r-md);
+    background:#FFFFFF;
+    box-shadow:var(--e1);
+}
+.about-tech-label {
+    color:var(--ink-3);
+    font-family:var(--pj); font-weight:700;
+    font-size:.66rem; letter-spacing:.05em; text-transform:uppercase;
+    margin-bottom:6px;
+}
+.about-tech-value {
+    font-family:var(--pj); font-weight:800;
+    font-size:1rem; color:var(--ink-1); line-height:1.25;
+}
+.about-tech-note { color:var(--ink-3); font-size:.72rem; margin-top:5px; line-height:1.5; }
+
+/* Closing CTA band (navy signature) */
+.about-cta {
+    position:relative;
+    overflow:hidden;
+    margin-top:24px;
+    padding:34px 36px;
+    border-radius:26px;
+    border:1px solid rgba(20,46,86,.55);
+    background:
+        radial-gradient(circle at 90% 8%, rgba(255,255,255,.08), transparent 10rem),
+        var(--navy-grad);
+    box-shadow:0 24px 54px rgba(9,26,52,.24);
+}
+.about-cta::after {
+    content:"✦";
+    position:absolute; right:30px; top:22px;
+    color:var(--gold); font-size:2rem; opacity:.9;
+}
+.about-cta-title {
+    font-family:var(--pj);
+    color:#FFFFFF; font-size:1.5rem; font-weight:800;
+    letter-spacing:-.03em;
+}
+.about-cta-text {
+    max-width:620px; margin-top:12px;
+    color:#B9C4D5; font-size:.9rem; line-height:1.7;
+}
+.about-cta-actions { display:flex; flex-wrap:wrap; gap:11px; margin-top:20px; }
+.about-cta-btn {
+    display:inline-flex; align-items:center; gap:8px;
+    padding:13px 20px; border-radius:12px;
+    font-family:var(--pj); font-weight:800; font-size:.85rem;
+    text-decoration:none;
+    transition:transform .16s ease, box-shadow .16s ease;
+}
+.about-cta-btn.primary {
+    background:var(--gold-grad); color:#15213B;
+    border:1px solid #F2B400;
+    box-shadow:0 12px 26px rgba(255,193,34,.28);
+}
+.about-cta-btn.ghost {
+    background:rgba(255,255,255,.06); color:#EAF0F8;
+    border:1px solid rgba(255,255,255,.16);
+}
+.about-cta-btn:hover { transform:translateY(-1px); }
+
+/* ============================================================
+   SITE FOOTER  —  the "it's a website" signal
+   ============================================================ */
+.site-footer {
+    margin:40px 0 6px;
+    padding:30px 30px 22px;
+    border:1px solid var(--hair);
+    border-radius:24px;
+    background:
+        radial-gradient(500px 220px at 96% -40%, rgba(255,201,40,.06), transparent 62%),
+        linear-gradient(180deg,#FFFFFF,#FBFCFE);
+    box-shadow:var(--e1);
+}
+.footer-top {
+    display:grid;
+    grid-template-columns:1.4fr 1fr 1fr;
+    gap:26px;
+    padding-bottom:22px;
+    border-bottom:1px solid var(--hair);
+}
+.footer-brand-name {
+    font-family:var(--pj); font-weight:800;
+    font-size:1.15rem; letter-spacing:-.02em; color:var(--ink-1);
+}
+.footer-brand-name span { color:#EDAE00; }
+.footer-brand-text {
+    margin-top:9px; max-width:340px;
+    color:var(--ink-3); font-size:.8rem; line-height:1.65;
+}
+.footer-badges { display:flex; flex-wrap:wrap; gap:7px; margin-top:14px; }
+.footer-badge {
+    padding:6px 11px; border-radius:999px;
+    background:rgba(255,201,40,.1);
+    border:1px solid rgba(224,168,15,.28);
+    color:#8A6600;
+    font-family:var(--pj); font-weight:700; font-size:.62rem;
+}
+.footer-col-title {
+    font-family:var(--pj); font-weight:800;
+    font-size:.7rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-2); margin-bottom:12px;
+}
+.footer-links { display:flex; flex-direction:column; gap:9px; }
+.footer-links a {
+    color:var(--ink-3); font-size:.82rem; text-decoration:none;
+    transition:color .15s ease, transform .15s ease;
+    width:fit-content;
+}
+.footer-links a:hover { color:#B07E00; transform:translateX(2px); }
+.footer-note { color:var(--ink-3); font-size:.78rem; line-height:1.6; }
+.footer-bottom {
+    display:flex; align-items:center; justify-content:space-between;
+    flex-wrap:wrap; gap:10px; padding-top:18px;
+}
+.footer-copy { color:var(--ink-3); font-size:.74rem; }
+.footer-disclaimer {
+    color:#8A94A6; font-size:.7rem; max-width:560px; text-align:right; line-height:1.55;
+}
+
+/* ============================================================
+   MOTION & A11Y FLOOR
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+    * { transition:none !important; animation:none !important; }
+    .kpi-card:hover, .nutrient-tile:hover, .model-pill:hover,
+    .result-card:hover, .recommend-card-rich:hover,
+    .about-value-card:hover, .tech-chip:hover { transform:none !important; }
+}
+a:focus-visible,
+button:focus-visible,
+[data-testid="stSidebar"] [role="radiogroup"] label:focus-within {
+    outline:2px solid rgba(255,201,40,.65) !important;
+    outline-offset:2px !important;
+}
+
+/* Responsive collapse for the new About + footer blocks */
+@media (max-width:900px) {
+    .about-values { grid-template-columns:1fr; }
+    .about-tech { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .footer-top { grid-template-columns:1fr; gap:20px; }
+    .footer-disclaimer { text-align:left; }
+    .about-band-title { font-size:1.6rem; }
+    .about-band, .about-cta { padding:24px 22px; }
+}
+@media (max-width:560px) {
+    .about-tech { grid-template-columns:1fr; }
+    .about-cta-actions { flex-direction:column; }
+    .about-cta-btn { justify-content:center; }
+}
+
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 
 # ============================================================
 # LOADERS
 # ============================================================
 
+# ============================================================
+# NOISYVIT LOADER (robust) — perbaikan pemuatan checkpoint
+# ------------------------------------------------------------
+# Bobot NoisyViT B/16 tersimpan di dalam key "model_state" (bersama
+# metadata: class_names, num_classes, epoch, dst) dengan prefix "vit.".
+# Loader ini membuka bungkus itu, mendeteksi jumlah kelas dari head,
+# lalu memuat bobot dengan strict=False.
+# ============================================================
+
+
+class _NoisyViTWrapper(nn.Module):
+    """Pembungkus ViT-B/16 agar key state_dict = vit.* (sesuai checkpoint)."""
+
+    def __init__(self, num_classes: int, model_name: str = "vit_base_patch16_224"):
+        super().__init__()
+        self.vit = timm.create_model(model_name, pretrained=False, num_classes=num_classes)
+
+    def forward(self, x):
+        return self.vit(x)
+
+
+def _looks_like_state_dict(d):
+    if not isinstance(d, dict) or not d:
+        return False
+    return any(hasattr(v, "shape") for v in d.values())
+
+
+def _noisyvit_extract_state_dict(ckpt):
+    if not isinstance(ckpt, dict):
+        return ckpt
+    for key in ("model_state", "state_dict", "model_state_dict", "model", "net", "weights"):
+        inner = ckpt.get(key)
+        if isinstance(inner, dict) and inner:
+            return inner
+    if _looks_like_state_dict(ckpt):
+        return ckpt
+    best = None
+    for v in ckpt.values():
+        if isinstance(v, dict) and _looks_like_state_dict(v):
+            if best is None or len(v) > len(best):
+                best = v
+    return best if best is not None else ckpt
+
+
+def _load_noisyvit_robust(path, num_classes=None, device=None):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    ckpt = torch.load(path, map_location=device)
+    state = _noisyvit_extract_state_dict(ckpt)
+    state = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in state.items()}
+    has_vit = any(k.startswith("vit.") for k in state)
+    bare_vit = any(k in ("cls_token", "pos_embed") or k.startswith("blocks.") for k in state)
+    if not has_vit and bare_vit:
+        state = {"vit." + k: v for k, v in state.items()}
+    head_w = state.get("vit.head.weight")
+    detected = int(head_w.shape[0]) if head_w is not None else (int(num_classes) if num_classes else 1000)
+    if num_classes is None:
+        num_classes = detected
+    model = _NoisyViTWrapper(num_classes=num_classes)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        print("[NoisyViT] key model belum terisi:", missing)
+    if unexpected:
+        print("[NoisyViT] key checkpoint tak terpakai:", unexpected)
+    if not missing and not unexpected:
+        print(f"[NoisyViT] OK - bobot dimuat penuh, num_classes={num_classes}")
+    model.to(device)
+    model.eval()
+    return model
+
+
+def _detect_food_num_classes(convnext_model, noisyvit_model, class_names):
+    """Jumlah output klasifikasi makanan yang sebenarnya dari model (mis. 56)."""
+    def out_features(m):
+        head = getattr(m, "head", None)
+        if head is not None and hasattr(head, "fc") and hasattr(head.fc, "out_features"):
+            return int(head.fc.out_features)
+        vit = getattr(m, "vit", None)
+        if vit is not None and hasattr(vit, "head") and hasattr(vit.head, "out_features"):
+            return int(vit.head.out_features)
+        if head is not None and hasattr(head, "out_features"):
+            return int(head.out_features)
+        return None
+    for m in (noisyvit_model, convnext_model):
+        n = out_features(m)
+        if n:
+            return n
+    return len(class_names)
+
+
 @st.cache_resource(show_spinner=False)
 def load_models():
-    convnext_path = MODEL_DIR / "convnextv2_tiny_best.pt"
-    noisyvit_path = MODEL_DIR / "noisyvit_b16_best.pt"
+    convnext_path = MODEL_DIR / "convnextv2_tiny_56class_nutrition_babyfood_best.pt"
+    noisyvit_path = MODEL_DIR / "noisyvit_b_16_56class_best.pt"
     mal_path = MODEL_DIR / "malnutrition_model.joblib"
 
     required = [convnext_path, noisyvit_path, mal_path]
@@ -4379,11 +5101,11 @@ def load_models():
 
     convnext_model = load_convnext_model(
         convnext_path,
-        num_classes=53,
+        num_classes=None,
     )
-    noisyvit_model = load_noisyvit_model(
+    noisyvit_model = _load_noisyvit_robust(
         noisyvit_path,
-        num_classes=53,
+        num_classes=None,
     )
     malnutrition_artifact = load_malnutrition_artifact(
         mal_path
@@ -4413,9 +5135,9 @@ def load_data():
 
     if not isinstance(class_names, list):
         raise ValueError("class_names.json harus berupa list nama kelas.")
-    if len(class_names) != 53:
+    if len(class_names) < 2:
         raise ValueError(
-            f"class_names.json harus berisi 53 kelas ensemble, ditemukan {len(class_names)}."
+            f"class_names.json harus berisi daftar kelas yang valid, ditemukan {len(class_names)}."
         )
 
     return (
@@ -5562,7 +6284,7 @@ page = st.session_state.nav_page
 now = datetime.now().strftime("%d %B %Y • %H:%M")
 
 st.markdown(
-    f"""<div class="hero-shell"><div class="hero-inner"><div class="hero-copy"><div class="hero-eyebrow">AI-POWERED NUTRITION SCREENING</div><div class="title">Nutri<span>Vision</span> AI</div><div class="subtitle">Integrasi data antropometri dan ensemble ConvNeXt V2 Tiny + NoisyViT B/16 untuk screening status gizi, pengenalan makanan, analisis nutrisi, dan rekomendasi yang lebih terarah.</div></div><div class="hero-logo-wrap"><img class="hero-logo-img" src="{LOGO_ICON_URI}" alt="NutriVision AI"></div><div class="hero-meta"><div class="date-pill">▣ {now}</div><div class="tech-row"><span class="tech-chip">◈ Ensemble Deep Learning</span><span class="tech-chip">♜ 53 Food Classes</span><span class="tech-chip">◇ Soft Voting</span></div></div></div></div>""",
+    f"""<div class="hero-shell"><div class="hero-inner"><div class="hero-copy"><div class="hero-eyebrow">AI-POWERED NUTRITION SCREENING</div><div class="title">Nutri<span>Vision</span> AI</div><div class="subtitle">Integrasi data antropometri dan ensemble ConvNeXt V2 Tiny + NoisyViT B/16 untuk screening status gizi, pengenalan makanan, analisis nutrisi, dan rekomendasi yang lebih terarah.</div></div><div class="hero-logo-wrap"><img class="hero-logo-img" src="{LOGO_ICON_URI}" alt="NutriVision AI"></div><div class="hero-meta"><div class="date-pill">▣ {now}</div><div class="tech-row"><span class="tech-chip">◈ Ensemble Deep Learning</span><span class="tech-chip">♜ 56 Food Classes</span><span class="tech-chip">◇ Soft Voting</span></div></div></div></div>""",
     unsafe_allow_html=True,
 )
 
@@ -5662,6 +6384,9 @@ if page == "Dashboard":
                 nutricheck_kb, nutricheck_food_col, nutricheck_nutrient_cols = build_nutrition_kb(nutricheck_df)
                 indo_kb, indo_food_col, indo_nutrient_cols = build_nutrition_kb(indonesia_df)
                 indo_rec_df, indo_rec_cols = build_recommendation_table(indo_kb, indo_food_col, indo_nutrient_cols)
+                _inference.FOOD_NUM_CLASSES = _detect_food_num_classes(
+                    convnext_model, noisyvit_model, class_names
+                )
                 result = analyze_child_and_food(
                     age_months=age_months, weight_kg=weight_kg, height_cm=height_cm, muac_cm=muac_cm,
                     image=image, requirements=requirements_df,
@@ -5783,7 +6508,7 @@ if page == "Dashboard":
                         alasan = html.escape(str(pr.get("alasan", "")))
                         icon = icon_map.get(jenis, "🍽️")
                         st.markdown(f"""<div class="rec-card"><div class="rec-rank">{icon}</div><div><div class="rec-name">{nama}</div><div class="rec-reason">{alasan}<br><span style="font-size:.64rem;color:#8A95A8;">pendamping {html.escape(jenis)} • cocok dengan {html.escape(top_food_display)}</span></div></div></div>""", unsafe_allow_html=True)
-                    st.caption("Disusun oleh AI Tim .....")
+                    st.caption("Disusun oleh Tim Orang Baek — Universitas Muhammadiyah Malang (UMM)")
                 elif recommendations:
                     for i, rec in enumerate(recommendations[:3], 1):
                         rec_category = rec.get("category_label", "menu")
@@ -5878,7 +6603,7 @@ if page == "Dashboard":
             with right_model:
                 st.plotly_chart(ensemble_weight_chart(ensemble_info), use_container_width=True, config={"displayModeBar": False})
             st.dataframe(pd.DataFrame([{"Kelas": food_display_name(p["food"]), "Ensemble (%)": round(p["confidence"] * 100, 2), "ConvNeXt (%)": round(p.get("convnext_confidence", 0) * 100, 2), "NoisyViT (%)": round(p.get("noisyvit_confidence", 0) * 100, 2)} for p in preds]), hide_index=True, use_container_width=True)
-            st.markdown('''<div class="flow-grid"><div class="flow-node"><div class="num">01</div><div class="title">Input Antropometri</div><div class="text">Umur, berat, tinggi, dan MUAC/LILA diproses oleh model screening status gizi.</div></div><div class="flow-node"><div class="num">02</div><div class="title">Input Foto Makanan</div><div class="text">Satu foto makanan diproses paralel oleh ConvNeXt V2 Tiny dan NoisyViT B/16.</div></div><div class="flow-node"><div class="num">03</div><div class="title">Ensemble Prediction</div><div class="text">Dua probabilitas keluaran digabung menggunakan weighted soft voting untuk menghasilkan prediksi final 53 kelas.</div></div><div class="flow-node"><div class="num">04</div><div class="title">Nutrition Mapping</div><div class="text">Kelas makanan dipetakan ke knowledge base nutrisi, lalu dibandingkan dengan AKG kelompok umur.</div></div><div class="flow-node"><div class="num">05</div><div class="title">Gap Analysis</div><div class="text">Sistem menghitung kontribusi dan gap nutrisi prioritas dari makanan yang terdeteksi.</div></div><div class="flow-node"><div class="num">06</div><div class="title">Rekomendasi Berbasis Umur & Gap</div><div class="text">Kandidat makanan diranking berdasarkan gap nutrisi, cakupan, kesesuaian kelompok umur, dan kualitas kategori makanan.</div></div></div>''', unsafe_allow_html=True)
+            st.markdown('''<div class="flow-grid"><div class="flow-node"><div class="num">01</div><div class="title">Input Antropometri</div><div class="text">Umur, berat, tinggi, dan MUAC/LILA diproses oleh model screening status gizi.</div></div><div class="flow-node"><div class="num">02</div><div class="title">Input Foto Makanan</div><div class="text">Satu foto makanan diproses paralel oleh ConvNeXt V2 Tiny dan NoisyViT B/16.</div></div><div class="flow-node"><div class="num">03</div><div class="title">Ensemble Prediction</div><div class="text">Dua probabilitas keluaran digabung menggunakan weighted soft voting untuk menghasilkan prediksi final 56 kelas.</div></div><div class="flow-node"><div class="num">04</div><div class="title">Nutrition Mapping</div><div class="text">Kelas makanan dipetakan ke knowledge base nutrisi, lalu dibandingkan dengan AKG kelompok umur.</div></div><div class="flow-node"><div class="num">05</div><div class="title">Gap Analysis</div><div class="text">Sistem menghitung kontribusi dan gap nutrisi prioritas dari makanan yang terdeteksi.</div></div><div class="flow-node"><div class="num">06</div><div class="title">Rekomendasi Berbasis Umur & Gap</div><div class="text">Kandidat makanan diranking berdasarkan gap nutrisi, cakupan, kesesuaian kelompok umur, dan kualitas kategori makanan.</div></div></div>''', unsafe_allow_html=True)
             st.caption("Detail model menampilkan keluaran ensemble, kontribusi masing-masing branch, serta alur pemrosesan NutriVision AI secara ringkas.")
 
         with tab6:
@@ -5888,7 +6613,7 @@ if page == "Dashboard":
             with st.spinner("Menyusun menu harian..."):
                 ai_plan = generate_ai_meal_plan(st.session_state.child_profile, str(status["prediction"]), plan_priorities, top_food_display, recommendations, meal_time)
             if ai_plan and ai_plan.get("meals"):
-                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "Disusun oleh Tim ..."
+                meals = ai_plan["meals"]; closing = str(ai_plan.get("catatan", "")); source_label = "Disusun oleh Tim Orang Baek — UMM"
             else:
                 meals = build_meal_plan(top_food_display, recommendations, plan_priorities, meal_time)
                 closing = "Menu disusun otomatis dari recommendation engine. Aktifkan mode AI (Gemini) untuk hasil lebih personal."
@@ -6242,13 +6967,33 @@ elif page == "Pengetahuan Gizi":
 
 else:
 
-    st.markdown("## Tentang Aplikasi")
-    st.caption(
-        "Ringkasan kapabilitas utama, pendekatan model, serta batasan penggunaan NutriVision AI."
-    )
-
+    # ---- About: mission band ----
     st.markdown(
         """
+        <div class="about-band">
+            <div class="about-band-eyebrow">Tentang NutriVision AI</div>
+            <div class="about-band-title">
+                Teknologi <span>multimodal</span> untuk skrining gizi anak yang lebih terarah.
+            </div>
+            <div class="about-band-lead">
+                NutriVision AI menggabungkan data antropometri anak dengan citra makanan untuk
+                membantu skrining status gizi, mengenali makanan, menganalisis kontribusi nutrisi
+                terhadap AKG, dan menyusun rekomendasi pendamping. Dirancang sebagai alat edukasi
+                dan skrining awal, bukan pengganti diagnosis tenaga kesehatan.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---- About: ringkasan sistem (stat cards) ----
+    st.markdown(
+        """
+        <div class="about-section-head">
+            <div class="about-section-kicker">Ringkasan Sistem</div>
+            <div class="about-section-title">Sekilas kapabilitas utama</div>
+            <div class="about-section-sub">Angka-angka penting yang mendefinisikan bagaimana NutriVision bekerja.</div>
+        </div>
         <div class="kpi-grid">
             <div class="kpi-card gold">
                 <div class="kpi-label">Pendekatan</div>
@@ -6257,7 +7002,7 @@ else:
             </div>
             <div class="kpi-card">
                 <div class="kpi-label">Food Classes</div>
-                <div class="kpi-value">53</div>
+                <div class="kpi-value">56</div>
                 <div class="kpi-sub">Kelas pada image recognition.</div>
             </div>
             <div class="kpi-card">
@@ -6270,6 +7015,18 @@ else:
                 <div class="kpi-value" style="font-size:1.08rem;">Screening + Rekomendasi</div>
                 <div class="kpi-sub">Status, nutrisi, dan saran makanan.</div>
             </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---- About: kapabilitas + alur sistem ----
+    st.markdown(
+        """
+        <div class="about-section-head">
+            <div class="about-section-kicker">Kapabilitas & Alur</div>
+            <div class="about-section-title">Apa yang dilakukan, dan bagaimana urutannya</div>
+            <div class="about-section-sub">Empat kapabilitas inti di sisi kiri, satu alur end-to-end di sisi kanan.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -6294,7 +7051,7 @@ else:
                 <div class="about-cap-title">Model & Explainability</div>
                 <div class="about-cap-text">
                     Food recognition menggunakan ensemble ConvNeXt V2 Tiny dan NoisyViT B/16
-                    dengan weighted soft voting pada 53 kelas. Grad-CAM menjelaskan branch ConvNeXt.
+                    dengan weighted soft voting pada 56 kelas. Grad-CAM menjelaskan branch ConvNeXt.
                 </div>
             </div>
             <div class="about-cap-card">
@@ -6361,3 +7118,147 @@ else:
             </div>""",
             unsafe_allow_html=True,
         )
+
+    # ---- About: nilai & prinsip ----
+    st.markdown(
+        """
+        <div class="about-section-head">
+            <div class="about-section-kicker">Nilai & Prinsip</div>
+            <div class="about-section-title">Prinsip yang menjaga sistem tetap bertanggung jawab</div>
+            <div class="about-section-sub">Tiga komitmen yang memandu cara NutriVision menyajikan hasil.</div>
+        </div>
+        <div class="about-values">
+            <div class="about-value-card">
+                <div class="about-value-icon">🩺</div>
+                <div class="about-value-title">Edukatif, bukan diagnosis</div>
+                <div class="about-value-text">
+                    Setiap keluaran diposisikan sebagai skrining awal dan bahan edukasi. Keputusan
+                    klinis tetap berada di tangan dokter anak atau ahli gizi.
+                </div>
+            </div>
+            <div class="about-value-card">
+                <div class="about-value-icon">🔍</div>
+                <div class="about-value-title">Transparan & dapat dijelaskan</div>
+                <div class="about-value-text">
+                    Grad-CAM dan rincian kontribusi nutrisi membantu memahami dasar dari sebuah
+                    prediksi, bukan sekadar menampilkan angka akhir.
+                </div>
+            </div>
+            <div class="about-value-card">
+                <div class="about-value-icon">👶</div>
+                <div class="about-value-title">Sesuai kelompok umur</div>
+                <div class="about-value-text">
+                    Analisis dan rekomendasi mengacu pada acuan gizi kelompok umur agar saran yang
+                    diberikan lebih relevan untuk kebutuhan anak.
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---- About: arsitektur teknologi ----
+    st.markdown(
+        """
+        <div class="about-section-head">
+            <div class="about-section-kicker">Arsitektur Teknologi</div>
+            <div class="about-section-title">Komponen di balik layar</div>
+            <div class="about-section-sub">Susunan model dan mesin analisis yang menggerakkan NutriVision.</div>
+        </div>
+        <div class="about-tech">
+            <div class="about-tech-item">
+                <div class="about-tech-label">Backbone 1</div>
+                <div class="about-tech-value">ConvNeXt V2 Tiny</div>
+                <div class="about-tech-note">Cabang CNN untuk pengenalan citra makanan.</div>
+            </div>
+            <div class="about-tech-item">
+                <div class="about-tech-label">Backbone 2</div>
+                <div class="about-tech-value">NoisyViT B/16</div>
+                <div class="about-tech-note">Cabang transformer untuk representasi visual.</div>
+            </div>
+            <div class="about-tech-item">
+                <div class="about-tech-label">Fusi</div>
+                <div class="about-tech-value">Weighted Soft Voting</div>
+                <div class="about-tech-note">Menggabungkan dua probabilitas menjadi prediksi final.</div>
+            </div>
+            <div class="about-tech-item">
+                <div class="about-tech-label">Mesin Analisis</div>
+                <div class="about-tech-value">KB Gizi + Rekomendasi</div>
+                <div class="about-tech-note">Pemetaan AKG, analisis gap, dan ranking makanan.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---- About: closing CTA ----
+    st.markdown(
+        """
+        <div class="about-cta">
+            <div class="about-cta-title">Siap mencoba analisis pertama?</div>
+            <div class="about-cta-text">
+                Masukkan data anak dan unggah satu foto makanan untuk melihat skrining status gizi,
+                pengenalan makanan, dan rekomendasi pendamping dalam satu alur.
+            </div>
+            <div class="about-cta-actions">
+                <a class="about-cta-btn primary" href="?nav=dashboard" target="_self">Mulai Analisis →</a>
+                <a class="about-cta-btn ghost" href="?nav=gizi" target="_self">Pelajari Nutrisi</a>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# SITE FOOTER  (tampil di semua halaman)
+# ============================================================
+
+_year = datetime.now().strftime("%Y")
+
+st.markdown(
+    f"""
+    <div class="site-footer">
+        <div class="footer-top">
+            <div>
+                <div class="footer-brand-name">Nutri<span>Vision</span> AI</div>
+                <div class="footer-brand-text">
+                    Skrining gizi anak berbasis AI multimodal — menggabungkan antropometri dan
+                    citra makanan untuk analisis nutrisi dan rekomendasi yang lebih terarah.
+                </div>
+                <div class="footer-badges">
+                    <span class="footer-badge">Ensemble Deep Learning</span>
+                    <span class="footer-badge">56 Food Classes</span>
+                    <span class="footer-badge">Explainable AI</span>
+                </div>
+            </div>
+            <div>
+                <div class="footer-col-title">Navigasi</div>
+                <div class="footer-links">
+                    <a href="?nav=dashboard" target="_self">Dashboard</a>
+                    <a href="?nav=riwayat" target="_self">Riwayat Analisis</a>
+                    <a href="?nav=profil" target="_self">Profil Anak</a>
+                    <a href="?nav=gizi" target="_self">Pengetahuan Gizi</a>
+                    <a href="?nav=tentang" target="_self">Tentang Aplikasi</a>
+                </div>
+            </div>
+            <div>
+                <div class="footer-col-title">Catatan Penggunaan</div>
+                <div class="footer-note">
+                    NutriVision AI adalah alat edukasi dan skrining awal. Hasil bukan diagnosis
+                    klinis. Untuk anak dengan indikasi gangguan gizi, konsultasikan dengan dokter
+                    anak atau ahli gizi.
+                </div>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <div class="footer-copy">© {_year} Tim Orang Baek • Universitas Muhammadiyah Malang (UMM)</div>
+            <div class="footer-disclaimer">
+                Dibuat untuk tujuan edukasi. Satu foto tidak mewakili asupan 24 jam, dan
+                rekomendasi bukan pengganti tenaga kesehatan profesional.
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

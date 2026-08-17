@@ -26,7 +26,7 @@ from .recommendation import (
 
 CONVNEXT_MODEL_NAME = "convnextv2_tiny"
 NOISYVIT_MODEL_NAME = "vit_base_patch16_224"
-FOOD_NUM_CLASSES = 53
+FOOD_NUM_CLASSES = 56
 
 # Baseline ensemble. Optimalkan bobot ini menggunakan validation set.
 DEFAULT_ENSEMBLE_WEIGHTS = (0.50, 0.50)
